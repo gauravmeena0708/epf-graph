@@ -214,4 +214,3 @@ if __name__ == '__main__':
     print(augmented_zero_flow_df[['establishment_id', 'net_inflow_recent', 'is_high_future_demand']])
     print(augmented_zero_flow_df['is_high_future_demand'].value_counts())
 
-```

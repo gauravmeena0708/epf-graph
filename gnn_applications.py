@@ -1,3 +1,5 @@
+# Contents of the modified gnn_applications.py
+
 # Core PyTorch and PyTorch Geometric imports
 import torch
 import torch.nn.functional as F
@@ -165,8 +167,8 @@ def create_pyg_data_object(nx_graph, processed_node_features_df, original_nodes_
     1.  Mapping 'establishment_id' to continuous integer indices.
     2.  Constructing the node feature tensor `x` from `processed_node_features_df`.
     3.  Constructing the edge index tensor `edge_index` and edge attribute tensor `edge_attr` (weights).
-    4.  Extracting and encoding labels ('industry', 'city', 'size_category') from `original_nodes_df`
-        and storing them as `y_<label_name>` attributes on the Data object.
+    4.  Extracting and encoding labels (e.g.,'industry', 'city', 'size_category', 'is_high_future_demand')
+        from `original_nodes_df` and storing them as `y_<label_name>` attributes on the Data object.
     5.  Storing mapping information (node IDs, label encodings) on the Data object.
 
     Args:
@@ -176,7 +178,7 @@ def create_pyg_data_object(nx_graph, processed_node_features_df, original_nodes_
                                                    This DataFrame should only contain numeric features and the ID.
         original_nodes_df (pd.DataFrame): The original nodes DataFrame, used to extract labels.
                                           Must contain 'establishment_id', and label columns like
-                                          'industry', 'city', 'size_category'.
+                                          'industry', 'city', 'size_category', and potentially 'is_high_future_demand'.
         feature_cols (list): List of column names in `processed_node_features_df` that constitute the features.
 
     Returns:
@@ -196,12 +198,9 @@ def create_pyg_data_object(nx_graph, processed_node_features_df, original_nodes_
     
     features_df_indexed = processed_node_features_df.set_index('establishment_id')
     
-    # Ensure feature_cols only contains columns present in features_df_indexed
-    # This is a safeguard, though preprocess_node_features should ensure this.
     valid_feature_cols = [col for col in feature_cols if col in features_df_indexed.columns]
     if len(valid_feature_cols) != len(feature_cols):
         print(f"Warning: Some feature_cols were not found in processed_node_features_df. Using valid subset.")
-        # This situation ideally shouldn't happen if preprocess_node_features is correct.
     
     aligned_features_df = features_df_indexed.reindex(graph_nodes_original_ids)[valid_feature_cols]
     
@@ -210,19 +209,12 @@ def create_pyg_data_object(nx_graph, processed_node_features_df, original_nodes_
         print(f"Warning: Nodes {missing_feature_nodes} are in the graph but missing features after reindexing. Filling with zeros.")
         aligned_features_df = aligned_features_df.fillna(0) 
 
-    # Convert the aligned feature DataFrame values to a NumPy array and then to a PyTorch tensor
-    # Ensure the underlying NumPy array is of a numeric type before tensor conversion.
-    # pd.get_dummies typically creates uint8, which is fine. fillna(0) also maintains numeric.
     try:
-        # Explicitly convert to a numeric type like float32 if there's any doubt,
-        # though pandas should handle this with get_dummies and fillna(0).
-        # The .values attribute gives a NumPy array.
         feature_values_np = aligned_features_df.values.astype(np.float32) 
         x = torch.tensor(feature_values_np, dtype=torch.float)
     except Exception as e:
         print(f"Error converting features to tensor. DataFrame dtypes: {aligned_features_df.dtypes}")
         raise e
-
 
     edge_list = []
     edge_attributes_list = []
@@ -244,22 +236,32 @@ def create_pyg_data_object(nx_graph, processed_node_features_df, original_nodes_
     original_nodes_df_indexed = original_nodes_df.set_index('establishment_id')
     aligned_original_nodes_for_labels = original_nodes_df_indexed.reindex(graph_nodes_original_ids)
 
+    # MODIFICATION: Dynamically include 'is_high_future_demand' if present
     label_column_names = ['industry', 'city', 'size_category']
+    if 'is_high_future_demand' in aligned_original_nodes_for_labels.columns:
+        if 'is_high_future_demand' not in label_column_names:
+             label_column_names.append('is_high_future_demand')
+    # END MODIFICATION
+
     data.label_encoders = {}
 
     for col_name in label_column_names:
-        if col_name in aligned_original_nodes_for_labels:
+        if col_name in aligned_original_nodes_for_labels.columns: # Check if column actually exists
             le = LabelEncoder()
+            # For boolean 'is_high_future_demand', .astype(str) converts True to "True", False to "False"
             labels_str = aligned_original_nodes_for_labels[col_name].fillna('Unknown').astype(str)
             encoded_labels = le.fit_transform(labels_str)
             
             setattr(data, f'y_{col_name}', torch.tensor(encoded_labels, dtype=torch.long))
             setattr(data, f'y_{col_name}_mapping', {i: cls_name for i, cls_name in enumerate(le.classes_)})
             data.label_encoders[col_name] = le
+        else:
+            print(f"Warning: Label column '{col_name}' specified but not found in the provided nodes DataFrame for labels.")
+
 
     data.node_id_map = node_id_map 
     data.idx_to_node_id = {v: k for k, v in node_id_map.items()} 
-    data.establishment_ids = graph_nodes_original_ids 
+    data.establishment_ids = graph_nodes_original_ids # Store original IDs
 
     return data, node_id_map
 
