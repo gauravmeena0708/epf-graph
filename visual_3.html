@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Employee Transfer Visualization (Optimized)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.min.js"
+        }
+    }
+    </script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; margin: 0; overflow: hidden; background-color: #1f2937; /* bg-gray-800 */ }
+        #visualizationContainer { width: 100vw; height: 100vh; position: relative; }
+        #controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background-color: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); display: flex; flex-direction: column; align-items: center; gap: 10px; }
+        .control-row { display: flex; align-items: center; gap: 15px; }
+        #timeSlider { width: 300px; }
+        #fileUploadButton { padding: 8px 15px; background-color: #4A90E2; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; }
+        #fileUploadButton:hover { background-color: #357ABD; }
+        #infoPanel { position: absolute; top: 20px; right: 20px; width: 300px; max-height: 90vh; overflow-y: auto; background-color: rgba(255, 255, 255, 0.95); padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); color: #1f2937; display: none; z-index: 10; }
+        #infoPanel h3 { font-size: 1.25rem; font-weight: bold; margin-bottom: 10px; color: #111827; }
+        #infoPanel p { margin-bottom: 8px; font-size: 0.875rem; }
+        #infoPanel strong { font-weight: 600; }
+        .close-button { position: absolute; top: 10px; right: 10px; background: #ef4444; color: white; border: none; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-weight: bold; }
+        #loadingIndicator, #processingIndicator, #initialMessage { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-size: 1.5rem; padding: 20px; background-color: rgba(0,0,0,0.8); border-radius: 8px; z-index: 20; text-align: center; }
+        #tooltip { position: absolute; background-color: rgba(0, 0, 0, 0.75); color: white; padding: 5px 10px; border-radius: 4px; pointer-events: none; opacity: 0; transition: opacity 0.2s; font-size: 0.8rem; z-index: 30;}
+    </style>
+</head>
+<body>
+    <div id="visualizationContainer">
+        <canvas id="mainCanvas"></canvas>
+    </div>
+
+    <div id="controls" class="text-gray-800">
+        <div class="control-row">
+            <input type="file" id="excelFile" accept=".xlsx, .xls" style="display: none;">
+            <button id="fileUploadButton">Upload Excel Data</button>
+        </div>
+        <div class="control-row">
+            <label for="timeSlider" class="font-semibold">Time (Month):</label>
+            <input type="range" id="timeSlider" min="0" value="0" disabled>
+            <span id="currentTimeDisplay" class="font-semibold w-16 text-center">Month: 0</span>
+        </div>
+    </div>
+
+    <div id="infoPanel">
+        <button id="closeInfoPanel" class="close-button">&times;</button>
+        <h3 id="infoName">Details</h3>
+        <div id="infoDetails"></div>
+    </div>
+
+    <div id="initialMessage">Upload an Excel file to start the visualization.</div>
+    <div id="loadingIndicator" style="display: none;">Loading Visualization...</div>
+    <div id="processingIndicator" style="display: none;">Processing Excel File...</div>
+    <div id="tooltip"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls;
+        let establishments = {}, employees = {}; // Logical data stores
+        let establishmentMeshes = {}; // Visual meshes for establishments
+        let employeeInstanceMesh; // Single InstancedMesh for all employees
+        let employeeIdToInstanceId = {};
+        let instanceIdToEmployeeId = [];
+
+        let MAX_TIMESTAMP = 0;
+        let currentTime = 0;
+        const EMPLOYEE_SPREAD_RADIUS = 30;
+        const EMPLOYEE_ANIMATION_DURATION = 1000; // ms
+
+        const tooltip = document.getElementById('tooltip');
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        let establishmentsData = []; // Raw data from Excel
+        let employeesData = {};    // Raw data from Excel (object for easy lookup)
+        let transfersData = [];    // Raw data from Excel
+        let transfersByEmployee = {}; // Pre-processed transfers
+
+        const initialMessageDiv = document.getElementById('initialMessage');
+        const loadingIndicatorDiv = document.getElementById('loadingIndicator');
+        const processingIndicatorDiv = document.getElementById('processingIndicator');
+        const timeSlider = document.getElementById('timeSlider');
+        const currentTimeDisplay = document.getElementById('currentTimeDisplay');
+        const fileUploadButton = document.getElementById('fileUploadButton');
+        const excelFileInput = document.getElementById('excelFile');
+
+        fileUploadButton.addEventListener('click', () => excelFileInput.click());
+        excelFileInput.addEventListener('change', handleFileUpload);
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (file) {
+                initialMessageDiv.style.display = 'none';
+                processingIndicatorDiv.style.display = 'block';
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, {type: 'array'});
+                    try {
+                        parseWorkbookData(workbook);
+                        resetAndInitializeScene();
+                        processingIndicatorDiv.style.display = 'none';
+                        timeSlider.disabled = false;
+                    } catch (error) {
+                        console.error("Error parsing workbook or initializing scene:", error);
+                        alert("Error processing Excel file. Check console for details. Ensure sheets 'Establishments', 'Employees', 'Transfers' exist and have correct columns.");
+                        processingIndicatorDiv.style.display = 'none';
+                        initialMessageDiv.style.display = 'block';
+                        timeSlider.disabled = true;
+                    }
+                };
+                reader.onerror = function(error) {
+                    console.error("FileReader error:", error);
+                    alert("Error reading file.");
+                    processingIndicatorDiv.style.display = 'none';
+                    initialMessageDiv.style.display = 'block';
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        }
+
+        function parseWorkbookData(workbook) {
+            establishmentsData = [];
+            employeesData = {};
+            transfersData = [];
+            transfersByEmployee = {};
+            MAX_TIMESTAMP = 0;
+
+            const estSheet = workbook.Sheets['Establishments'];
+            const empSheet = workbook.Sheets['Employees'];
+            const transSheet = workbook.Sheets['Transfers'];
+
+            if (!estSheet || !empSheet || !transSheet) {
+                throw new Error("One or more required sheets (Establishments, Employees, Transfers) are missing.");
+            }
+
+            const rawEstData = XLSX.utils.sheet_to_json(estSheet);
+            const rawEmpData = XLSX.utils.sheet_to_json(empSheet);
+            const rawTransData = XLSX.utils.sheet_to_json(transSheet);
+
+            establishmentsData = rawEstData.map(d => ({
+                id: String(d.id),
+                name: String(d.name),
+                industry: String(d.industry),
+                city: String(d.city),
+                owners: String(d.owners).split(',').map(s => s.trim()),
+                color: parseInt(String(d.color).replace('#', ''), 16),
+                initialPosition: { x: parseFloat(d.initialPositionX) || 0, y: parseFloat(d.initialPositionY) || 0, z: parseFloat(d.initialPositionZ) || 0 }
+            }));
+
+            rawEmpData.forEach(d => {
+                employeesData[String(d.id)] = {
+                    name: String(d.name),
+                    age: parseInt(d.age),
+                    balance: parseFloat(d.balance),
+                    wages: parseFloat(d.wages),
+                    jobTitle: String(d.jobTitle),
+                    initialEstablishmentId: String(d.initialEstablishmentId),
+                    color: parseInt(String(d.color).replace('#', ''), 16) || 0xffffff
+                };
+            });
+
+            transfersData = rawTransData.map(t => ({ // Keep a mapped version for potential other uses, but primarily use transfersByEmployee
+                employeeId: String(t.employeeId),
+                fromId: String(t.fromId),
+                toId: String(t.toId),
+                timestamp: parseInt(t.timestamp),
+                balanceChange: parseFloat(t.balanceChange) || 0
+            }));
+
+            // Pre-process transfers for efficient lookup
+            transfersData.forEach(t => {
+                const empId = t.employeeId;
+                if (!transfersByEmployee[empId]) {
+                    transfersByEmployee[empId] = [];
+                }
+                transfersByEmployee[empId].push({
+                    timestamp: t.timestamp,
+                    toId: t.toId,
+                    balanceChange: t.balanceChange
+                });
+            });
+
+            for (const empId in transfersByEmployee) {
+                transfersByEmployee[empId].sort((a, b) => a.timestamp - b.timestamp);
+            }
+            
+            if (transfersData.length > 0) {
+                MAX_TIMESTAMP = Math.max(...transfersData.map(t => t.timestamp), 0);
+            } else {
+                // If no transfers, check if any employee has a hire timestamp or similar for max_timestamp
+                // For now, defaults to 0 if no transfers. Could be 1 if we want at least one "tick".
+                MAX_TIMESTAMP = Math.max(...Object.values(employeesData).map(e => e.initialTimestamp || 0), 0); // Assuming an optional initialTimestamp
+            }
+            
+            timeSlider.max = MAX_TIMESTAMP;
+            timeSlider.value = 0;
+            currentTime = 0;
+            currentTimeDisplay.textContent = `Month: 0`;
+        }
+        
+        function clearScene() {
+            if (!scene) return;
+            // Dispose and remove InstancedMesh for employees
+            if (employeeInstanceMesh) {
+                if (employeeInstanceMesh.geometry) employeeInstanceMesh.geometry.dispose();
+                if (employeeInstanceMesh.material) employeeInstanceMesh.material.dispose();
+                scene.remove(employeeInstanceMesh);
+                employeeInstanceMesh = null;
+            }
+            Object.values(establishmentMeshes).forEach(mesh => {
+                if (mesh.geometry) mesh.geometry.dispose();
+                if (mesh.material) mesh.material.dispose();
+                scene.remove(mesh);
+            });
+        
+            establishmentMeshes = {};
+            establishments = {}; // Logical establishment data
+            employees = {};      // Logical employee data
+            employeeIdToInstanceId = {};
+            instanceIdToEmployeeId = [];
+        }
+
+        function resetAndInitializeScene() {
+            loadingIndicatorDiv.style.display = 'block';
+            if (scene) {
+                clearScene();
+            } else { // First time initialization
+                const container = document.getElementById('visualizationContainer');
+                const canvas = document.getElementById('mainCanvas');
+                scene = new THREE.Scene();
+                scene.background = new THREE.Color(0x1f2937);
+                camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 3000); // Increased far plane
+                camera.position.set(0, 250, 600); // Adjusted camera start
+                renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+                renderer.setSize(container.clientWidth, container.clientHeight);
+                renderer.setPixelRatio(window.devicePixelRatio);
+                
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+                scene.add(ambientLight);
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(50, 200, 100);
+                scene.add(directionalLight);
+
+                controls = new OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.05;
+                controls.minDistance = 50; // Adjusted min distance
+                controls.maxDistance = 2500; // Adjusted max distance
+                controls.maxPolarAngle = Math.PI / 1.5; // Allow looking slightly more downwards
+
+                window.addEventListener('resize', onWindowResize);
+                timeSlider.addEventListener('input', onTimeSliderChange);
+                document.getElementById('closeInfoPanel').addEventListener('click', () => {
+                    document.getElementById('infoPanel').style.display = 'none';
+                });
+                renderer.domElement.addEventListener('click', onCanvasClick);
+                renderer.domElement.addEventListener('mousemove', onCanvasMouseMove);
+                
+                animate(); 
+            }
+
+            createEstablishmentObjects();
+            createEmployeeObjectsInstanced(); // Use new instanced method
+            updateVisuals(currentTime, true); // Initial placement
+            loadingIndicatorDiv.style.display = 'none';
+        }
+
+        function createEstablishmentObjects() {
+            const geometry = new THREE.SphereGeometry(25, 32, 32); // Detail can be reduced for many establishments
+            establishmentsData.forEach(data => {
+                const material = new THREE.MeshPhongMaterial({ color: data.color });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.set(data.initialPosition.x, data.initialPosition.y, data.initialPosition.z);
+                mesh.userData = { type: 'establishment', id: data.id, ...data };
+                scene.add(mesh);
+                establishmentMeshes[data.id] = mesh;
+                establishments[data.id] = { ...data, mesh: mesh, currentEmployees: new Set() };
+            });
+        }
+
+        function createEmployeeObjectsInstanced() {
+            if (employeeInstanceMesh) { // Clean up old one if any
+                if (employeeInstanceMesh.geometry) employeeInstanceMesh.geometry.dispose();
+                if (employeeInstanceMesh.material) employeeInstanceMesh.material.dispose();
+                scene.remove(employeeInstanceMesh);
+                employeeInstanceMesh = null;
+            }
+            employeeIdToInstanceId = {};
+            instanceIdToEmployeeId = [];
+            employees = {}; // Reset logical employee store
+
+            const employeeIds = Object.keys(employeesData);
+            const numEmployees = employeeIds.length;
+
+            if (numEmployees === 0) return;
+
+            const geometry = new THREE.SphereGeometry(5, 10, 10); // Slightly simpler geometry for instances
+            const material = new THREE.MeshPhongMaterial({vertexColors: false}); // Use instance color
+
+            employeeInstanceMesh = new THREE.InstancedMesh(geometry, material, numEmployees);
+            employeeInstanceMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); // Important for performance
+            scene.add(employeeInstanceMesh);
+
+            const defaultColor = new THREE.Color(0xffffff);
+
+            employeeIds.forEach((id, index) => {
+                const data = employeesData[id];
+                employeeIdToInstanceId[id] = index;
+                instanceIdToEmployeeId[index] = id;
+
+                employees[id] = { // Store logical employee data
+                    ...data,
+                    instanceId: index,
+                    currentEstablishmentId: data.initialEstablishmentId,
+                    currentBalance: data.balance,
+                    isAnimating: false,
+                    animationData: null,
+                    currentPosition: new THREE.Vector3(), // Stores the current rendered position
+                    targetPosition: new THREE.Vector3()   // Stores the target position for animation/placement
+                };
+                // Initial color
+                employeeInstanceMesh.setColorAt(index, data.color ? new THREE.Color(data.color) : defaultColor);
+            });
+            if (employeeInstanceMesh.instanceColor) employeeInstanceMesh.instanceColor.needsUpdate = true;
+        }
+        
+        function updateEmployeeInstancePosition(employeeId, position) {
+            const empGlobalData = employees[employeeId];
+            if (empGlobalData && empGlobalData.instanceId !== undefined && employeeInstanceMesh) {
+                const instanceId = empGlobalData.instanceId;
+                const matrix = new THREE.Matrix4();
+                matrix.setPosition(position);
+                employeeInstanceMesh.setMatrixAt(instanceId, matrix);
+                // instanceMatrix.needsUpdate will be set once per frame in animate or updateVisuals
+            }
+        }
+
+        function getEmployeeStateAtTime(employeeId, time) {
+            const employeeInitialData = employeesData[employeeId];
+            if (!employeeInitialData) return { establishmentId: null, balance: 0 };
+
+            let currentEstId = employeeInitialData.initialEstablishmentId;
+            let currentBalance = employeeInitialData.balance;
+
+            const employeeSpecificTransfers = transfersByEmployee[employeeId] || [];
+            for (const transfer of employeeSpecificTransfers) {
+                if (transfer.timestamp <= time) {
+                    currentEstId = transfer.toId;
+                    currentBalance += transfer.balanceChange;
+                } else {
+                    break; 
+                }
+            }
+            return { establishmentId: currentEstId, balance: currentBalance };
+        }
+
+        function updateVisuals(time, isInitialPlacement = false) {
+            if (!employeeInstanceMesh && Object.keys(employeesData).length > 0) {
+                 console.warn("Employee instanced mesh not available for updateVisuals.");
+                 return;
+            }
+            const tempMatrix = new THREE.Matrix4();
+            let matrixChanged = false;
+
+            // Clear currentEmployees sets on establishments before recalculating for the given time
+            // This is important if time can go backward or jump, to ensure correct counts.
+            // For initialPlacement, establishments are freshly created with empty sets.
+            // For subsequent calls, we need to ensure consistency.
+            if (!isInitialPlacement) {
+                 for (const estId in establishments) {
+                    establishments[estId].currentEmployees.clear();
+                }
+            }
+
+
+            Object.entries(employees).forEach(([empId, empData]) => {
+                const stateAtTime = getEmployeeStateAtTime(empId, time);
+                empData.currentBalance = stateAtTime.balance;
+                const logicalTargetEstId = stateAtTime.establishmentId;
+
+                const oldLogicalEstablishmentId = empData.currentEstablishmentId;
+
+                if (isInitialPlacement) {
+                    empData.currentEstablishmentId = logicalTargetEstId;
+                    const targetEstMesh = establishmentMeshes[logicalTargetEstId];
+                    if (targetEstMesh) {
+                        if (establishments[logicalTargetEstId]) {
+                            establishments[logicalTargetEstId].currentEmployees.add(empId);
+                        }
+                        const pos = getEmployeePositionAroundEstablishment(targetEstMesh, empId, logicalTargetEstId);
+                        empData.currentPosition.copy(pos);
+                        empData.targetPosition.copy(pos);
+                        updateEmployeeInstancePosition(empId, pos);
+                        matrixChanged = true;
+                    } else { // No valid establishment for initial placement
+                        tempMatrix.makeScale(0,0,0); // Hide
+                        employeeInstanceMesh.setMatrixAt(empData.instanceId, tempMatrix);
+                        matrixChanged = true;
+                    }
+                    empData.isAnimating = false;
+                } else { // Not initial placement - handle transfers, animations, and update currentEmployees sets
+                    // First, update all currentEmployees sets based on stateAtTime
+                    if (establishments[logicalTargetEstId]) {
+                        establishments[logicalTargetEstId].currentEmployees.add(empId);
+                    }
+
+                    if (oldLogicalEstablishmentId !== logicalTargetEstId) {
+                        const toEstMesh = establishmentMeshes[logicalTargetEstId];
+                        if (toEstMesh) {
+                            empData.isAnimating = true;
+                            const startPos = empData.currentPosition.clone();
+                            const endPos = getEmployeePositionAroundEstablishment(toEstMesh, empId, logicalTargetEstId);
+                            empData.animationData = {
+                                startPos: startPos,
+                                endPos: endPos,
+                                startTime: performance.now()
+                            };
+                            empData.targetPosition.copy(endPos);
+                            // currentEmployees sets are handled above for all employees at this time
+                        } else { // Target establishment doesn't exist
+                            tempMatrix.makeScale(0,0,0); // Hide
+                            employeeInstanceMesh.setMatrixAt(empData.instanceId, tempMatrix);
+                            matrixChanged = true;
+                            empData.isAnimating = false;
+                        }
+                        empData.currentEstablishmentId = logicalTargetEstId; // Update logical ID
+                    } else { // Same establishment, ensure position is correct if not animating
+                        if (!empData.isAnimating) {
+                            const currentEstMesh = establishmentMeshes[empData.currentEstablishmentId];
+                            if (currentEstMesh) {
+                                const pos = getEmployeePositionAroundEstablishment(currentEstMesh, empId, empData.currentEstablishmentId);
+                                if (!empData.currentPosition.equals(pos)) {
+                                    empData.currentPosition.copy(pos);
+                                    empData.targetPosition.copy(pos);
+                                    updateEmployeeInstancePosition(empId, pos);
+                                    matrixChanged = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            if (matrixChanged && employeeInstanceMesh) {
+                employeeInstanceMesh.instanceMatrix.needsUpdate = true;
+            }
+        }
+        
+        function getEmployeePositionAroundEstablishment(establishmentMesh, employeeId, establishmentId) {
+            const basePos = establishmentMesh.position.clone();
+            const estObject = establishments[establishmentId];
+
+            if (!estObject || !estObject.currentEmployees || estObject.currentEmployees.size === 0) {
+                return basePos.add(new THREE.Vector3(0, (establishmentMesh.geometry.parameters.radius || 25) + 5, 0));
+            }
+
+            // Convert Set to Array for consistent ordering for this specific call
+            const employeeArray = Array.from(estObject.currentEmployees); 
+            const employeeIndex = employeeArray.indexOf(employeeId);
+            const totalEmployeesAtEst = employeeArray.length;
+            
+            if (totalEmployeesAtEst <= 0 || employeeIndex === -1) {
+                const randomOffset = () => (Math.random() * 10 - 5);
+                return basePos.add(new THREE.Vector3(randomOffset(), (establishmentMesh.geometry.parameters.radius || 25) + 5 + randomOffset()/2 , randomOffset()));
+            }
+
+            const angle = (employeeIndex / totalEmployeesAtEst) * Math.PI * 2;
+            // Make radius dynamic if too many employees
+            const radiusFactor = Math.min(1, 100 / totalEmployeesAtEst); // Simple factor, can be improved
+            const currentSpreadRadius = EMPLOYEE_SPREAD_RADIUS * (1 + Math.floor(employeeIndex / (20 * radiusFactor)) * 0.5) ; // Basic layering
+
+            const offsetX = Math.cos(angle) * currentSpreadRadius;
+            const offsetZ = Math.sin(angle) * currentSpreadRadius;
+            const establishmentRadius = establishmentMesh.geometry.parameters.radius || 25;
+            // Add small random y to differentiate vertically if needed, or fixed small offset
+            const offsetY = establishmentRadius * 0.25 + ( (employeeIndex % 5) * 2 ); // Simple vertical spread
+            return basePos.add(new THREE.Vector3(offsetX, offsetY, offsetZ));
+        }
+
+
+        function onWindowResize() {
+            if (!camera || !renderer) return;
+            const container = document.getElementById('visualizationContainer');
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        }
+        
+        let sliderUpdateTimeout;
+        function onTimeSliderChange(event) {
+            const newTime = parseInt(event.target.value);
+            currentTimeDisplay.textContent = `Month: ${newTime}`; 
+            
+            clearTimeout(sliderUpdateTimeout);
+            sliderUpdateTimeout = setTimeout(() => {
+                currentTime = newTime;
+                updateVisuals(currentTime); // isInitialPlacement is false by default
+            }, 50); // Small debounce to prevent overwhelming updates if slider is dragged fast
+        }
+
+        function onCanvasClick(event) {
+            if (!scene || !camera || !renderer) return;
+            mouse.x = (event.clientX / renderer.domElement.clientWidth) * 2 - 1;
+            mouse.y = -(event.clientY / renderer.domElement.clientHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+
+            const objectsToIntersect = [];
+            if (employeeInstanceMesh) objectsToIntersect.push(employeeInstanceMesh);
+            Object.values(establishmentMeshes).forEach(mesh => objectsToIntersect.push(mesh));
+
+            const intersects = raycaster.intersectObjects(objectsToIntersect, false); 
+
+            if (intersects.length > 0) {
+                const intersected = intersects[0];
+                let objectUserData;
+
+                if (intersected.object.isInstancedMesh && intersected.instanceId !== undefined) {
+                    const employeeId = instanceIdToEmployeeId[intersected.instanceId];
+                    if (employeeId && employees[employeeId]) { // Use 'employees' for current logical state
+                        objectUserData = { type: 'employee', id: employeeId, ...employees[employeeId] };
+                        // 'name' and other static props are already spread from employeesData into employees[employeeId]
+                    }
+                } else if (intersected.object.userData && intersected.object.userData.type === 'establishment') {
+                    objectUserData = intersected.object.userData;
+                }
+
+                if (objectUserData) {
+                    displayInfo(objectUserData);
+                } else {
+                     document.getElementById('infoPanel').style.display = 'none';
+                }
+            } else {
+                document.getElementById('infoPanel').style.display = 'none';
+            }
+        }
+        
+        function onCanvasMouseMove(event) {
+            if (!scene || !camera || !renderer) { tooltip.style.opacity = '0'; return; }
+            mouse.x = (event.clientX / renderer.domElement.clientWidth) * 2 - 1;
+            mouse.y = -(event.clientY / renderer.domElement.clientHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+
+            const objectsToIntersect = [];
+            if (employeeInstanceMesh) objectsToIntersect.push(employeeInstanceMesh);
+            Object.values(establishmentMeshes).forEach(mesh => objectsToIntersect.push(mesh));
+            
+            const intersects = raycaster.intersectObjects(objectsToIntersect, false);
+            if (intersects.length > 0) {
+                const intersected = intersects[0];
+                let hoverData = null;
+
+                if (intersected.object.isInstancedMesh && intersected.instanceId !== undefined) {
+                    const employeeId = instanceIdToEmployeeId[intersected.instanceId];
+                    if (employeeId && employeesData[employeeId]) { 
+                        hoverData = { type: 'employee', name: employeesData[employeeId].name, id: employeeId };
+                    }
+                } else if (intersected.object.userData && intersected.object.userData.type === 'establishment') {
+                    hoverData = intersected.object.userData; // Contains name and id
+                }
+
+                if (hoverData) {
+                    tooltip.style.opacity = '1';
+                    tooltip.style.left = `${event.clientX + 10}px`;
+                    tooltip.style.top = `${event.clientY + 10}px`;
+                    tooltip.textContent = `${hoverData.type === 'establishment' ? 'Est:' : 'Emp:'} ${hoverData.name} (${hoverData.id})`;
+                } else {
+                    tooltip.style.opacity = '0';
+                }
+            } else {
+                tooltip.style.opacity = '0';
+            }
+        }
+
+        function displayInfo(data) {
+            const infoPanel = document.getElementById('infoPanel');
+            const infoName = document.getElementById('infoName');
+            const infoDetails = document.getElementById('infoDetails');
+            infoName.textContent = data.name || data.id;
+            let detailsHtml = `<p><strong>ID:</strong> ${data.id}</p>`;
+
+            if (data.type === 'establishment') {
+                detailsHtml += `<p><strong>Industry:</strong> ${data.industry}</p>`;
+                detailsHtml += `<p><strong>City:</strong> ${data.city}</p>`;
+                detailsHtml += `<p><strong>Owners:</strong> ${Array.isArray(data.owners) ? data.owners.join(', ') : data.owners}</p>`;
+                
+                const estObject = establishments[data.id];
+                const empCount = estObject && estObject.currentEmployees ? estObject.currentEmployees.size : 0;
+                let currentEmpList = 'None';
+                if (empCount > 0) {
+                    currentEmpList = Array.from(estObject.currentEmployees).map(empId => {
+                        const emp = employeesData[empId]; // Get name from static data
+                        return emp ? emp.name : empId;
+                    }).join(', ');
+                    if (currentEmpList.length > 200) currentEmpList = currentEmpList.substring(0,200) + "..."; // Truncate if too long
+                }
+                detailsHtml += `<p><strong>Current Employees (${empCount}):</strong> ${currentEmpList}</p>`;
+
+            } else if (data.type === 'employee') { // data here is from 'employees' logical store
+                detailsHtml += `<p><strong>Age:</strong> ${data.age}</p>`;
+                detailsHtml += `<p><strong>Job Title:</strong> ${data.jobTitle}</p>`;
+                detailsHtml += `<p><strong>Balance:</strong> ${data.currentBalance.toLocaleString()}</p>`;
+                detailsHtml += `<p><strong>Wages:</strong> ${data.wages.toLocaleString()}</p>`;
+                const currentEst = establishmentMeshes[data.currentEstablishmentId];
+                detailsHtml += `<p><strong>Current Establishment:</strong> ${currentEst ? currentEst.userData.name : (data.currentEstablishmentId || 'N/A')}</p>`;
+            }
+            infoDetails.innerHTML = detailsHtml;
+            infoPanel.style.display = 'block';
+        }
+
+        let animationFrameId = null;
+        function animate() {
+            animationFrameId = requestAnimationFrame(animate);
+            if (controls) controls.update();
+            TWEEN.update(); // If you use TWEEN elsewhere
+
+            let matrixNeedsUpdate = false;
+            const tempMatrix = new THREE.Matrix4();
+
+            if (employeeInstanceMesh) { // Ensure mesh exists
+                Object.values(employees).forEach(empData => {
+                    if (empData.isAnimating && empData.animationData) {
+                        const ad = empData.animationData;
+                        const elapsedTime = performance.now() - ad.startTime;
+                        let progress = elapsedTime / EMPLOYEE_ANIMATION_DURATION;
+
+                        if (progress >= 1) {
+                            progress = 1;
+                            empData.isAnimating = false;
+                            empData.animationData = null;
+                            empData.currentPosition.copy(ad.endPos);
+                        } else {
+                            // Ease-out Quint easing function for smoother animation
+                            const easedProgress = 1 - Math.pow(1 - progress, 3); // Cubic ease out, adjust exponent for different feel
+                            empData.currentPosition.lerpVectors(ad.startPos, ad.endPos, easedProgress);
+                        }
+                        
+                        if (empData.instanceId !== undefined) {
+                            tempMatrix.setPosition(empData.currentPosition);
+                            employeeInstanceMesh.setMatrixAt(empData.instanceId, tempMatrix);
+                            matrixNeedsUpdate = true;
+                        }
+                    }
+                });
+
+                if (matrixNeedsUpdate) {
+                    employeeInstanceMesh.instanceMatrix.needsUpdate = true;
+                }
+            }
+            if (renderer && scene && camera) renderer.render(scene, camera);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Initialization happens after file upload
+        });
+    </script>
+</body>
+</html>
