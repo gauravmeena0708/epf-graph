@@ -179,6 +179,12 @@ The `run_gnn_applications.py` script is the entry point for these tasks.
         ```bash
         python run_gnn_applications.py --gnn_model gat --application anomaly_detection --epochs 100 --embedding_size 32 --decoder_hidden_dims 64 32 --anomaly_top_n 15
         ```
+    4. **Final 3 commands**
+       ```bash
+       python run_gnn_applications.py --gnn_model gcn --application anomaly_detection --epochs 100 --embedding_size 32 --decoder_hidden_dims 64 32 --anomaly_top_n 10
+       python run_gnn_applications.py --gnn_model gcn --application clustering --n_clusters 5 --epochs 50 --embedding_size 32
+       python run_gnn_applications.py --gnn_model gcn --application classification --target_label industry --epochs 50
+       ```
 
 ## 9. Outputs
 *   **`run_analysis.py`**: Prints all results (DataFrames, lists, metrics) directly to the console, formatted for readability.
@@ -194,35 +200,6 @@ The project is designed to be extensible. New graph analysis functions can be ad
 1.  Importing the new function in `run_analysis.py`.
 2.  Adding relevant command-line arguments if customization is needed.
 3.  Calling the function within the appropriate analysis block (e.g., establishment, transfer, network) in `run_analysis.py`.
-
-## 10. #TODO
-Here are 25 ideas for real-world applications using graph data from EPFO:
-
-    Detecting fraudulent claims by identifying unusual patterns of member transfers or establishment connections.
-    Predicting future high-demand areas for EPFO services based on establishment growth and member migration.
-    Identifying industries or regions with high employee churn rates to inform policy interventions.
-    Optimizing resource allocation for EPFO offices based on the density and flow of members and establishments.
-    Enhancing compliance by identifying establishments with suspicious or non-compliant transfer behaviors.
-    Understanding labor migration patterns across different states or industrial sectors for economic planning.
-    Identifying critical establishments whose failure could impact a large number of employees' provident funds.
-    Improving targeted communication strategies by understanding an establishment's influence network.
-    Streamlining the member transfer process by analyzing common transfer pathways and bottlenecks.
-    Assessing the impact of economic policies on employment and fund contributions through network changes.
-    Developing early warning systems for industries or establishments facing financial distress based on member outflow.
-    Facilitating skill development programs by identifying industries with high member inflow requiring specific skills.
-    Mapping the spread of employment trends or new job roles across the network of establishments.
-    Identifying shell companies or fictitious establishments created for siphoning funds through graph anomalies.
-    Analyzing the effectiveness of social security schemes by observing coverage changes in the establishment network.
-    Supporting macroeconomic analysis by providing insights into inter-industry dependencies and labor flow.
-    Predicting potential large-scale claim events based on unusual aggregation of members in certain establishments.
-    Identifying influential establishments that can act as key partners for disseminating EPFO information or initiatives.
-    Simulating the impact of policy changes (e.g., contribution rates) on the overall fund ecosystem.
-    Enhancing risk assessment for investments by understanding the stability of various sectors through employment patterns.
-    Detecting collusive behavior between establishments for manipulating provident fund contributions or withdrawals.
-    Improving the accuracy of actuarial valuations by incorporating dynamic labor mobility data.
-    Personalizing advisory services to members based on their career trajectory observed through transfers.
-    Monitoring and ensuring compliance with labor laws related to contract workers and their PF contributions across establishments.
-    Building a "know your establishment" (KYE) system to better understand the interconnectedness and risk profile of employers.
 
 
 
