@@ -46,54 +46,112 @@ def load_establishment_data(nodes_filepath="epfo_establishments_nodes.csv", edge
     return nx_graph, nodes_df, edges_df
 
 
-def preprocess_node_features(nodes_df):
+def preprocess_node_features(nodes_df, numerical_feature_cols: list = None):
     """
-    Preprocesses node features by applying one-hot encoding to specified categorical attributes.
+    Preprocesses node features by applying one-hot encoding to categorical attributes
+    and standard scaling to numerical attributes.
 
-    Only 'industry', 'city', and 'size_category' are one-hot encoded. Other columns like 'name'
-    are excluded from the final feature set to ensure a purely numeric feature matrix.
-    The 'establishment_id' column is preserved for mapping.
+    Categorical features ('industry', 'city', 'size_category') are one-hot encoded.
+    Specified numerical features are scaled using StandardScaler.
+    Other columns (e.g., 'name') are excluded from the final feature set.
+    The 'establishment_id' column is preserved.
 
     Args:
         nodes_df (pd.DataFrame): DataFrame containing node information, including 'establishment_id'.
-                                 It is expected to have 'industry', 'city', 'size_category' columns.
+                                 Must have 'industry', 'city', 'size_category' if no specific
+                                 categorical columns are passed (though currently hardcoded).
+        numerical_feature_cols (list, optional): List of column names to be treated as
+                                                 numerical features and scaled. Defaults to None.
 
     Returns:
         tuple:
-            - features_df_final (pd.DataFrame): DataFrame with 'establishment_id' and one-hot encoded features.
-                                                This DataFrame only contains numeric features suitable for tensor conversion.
-            - feature_names (list): List of strings representing the names of the generated one-hot encoded feature columns.
+            - features_df_final (pd.DataFrame): DataFrame with 'establishment_id' and processed features
+                                                (one-hot encoded categorical + scaled numerical).
+            - feature_names (list): List of strings representing the names of all generated feature columns.
     Raises:
-        ValueError: If 'establishment_id' column is missing or if any of the expected
-                    categorical feature columns ('industry', 'city', 'size_category') are missing.
+        ValueError: If 'establishment_id' column is missing or if any expected categorical
+                    columns are missing.
     """
     if 'establishment_id' not in nodes_df.columns:
         raise ValueError("nodes_df must contain 'establishment_id' column.")
 
+    # --- Categorical Feature Processing ---
     categorical_to_encode = ['industry', 'city', 'size_category']
+    missing_categorical_cols = [col for col in categorical_to_encode if col not in nodes_df.columns]
+    if missing_categorical_cols:
+        raise ValueError(f"Missing expected categorical columns in nodes_df: {missing_categorical_cols}")
 
-    # Ensure all specified categorical features are present in the input nodes_df
-    missing_cols = [col for col in categorical_to_encode if col not in nodes_df.columns]
-    if missing_cols:
-        raise ValueError(f"Missing expected categorical columns in nodes_df for one-hot encoding: {missing_cols}")
+    # Use a copy to avoid SettingWithCopyWarning when modifying df_for_encoding
+    df_for_processing = nodes_df.copy()
+    # Set 'establishment_id' as index early to ensure alignment for all feature types
+    df_for_processing_indexed = df_for_processing.set_index('establishment_id')
 
-    # Select only the establishment_id and the categorical columns for one-hot encoding.
-    # This explicitly excludes other columns (like 'name') from being part of the feature matrix.
-    df_for_encoding = nodes_df[['establishment_id'] + categorical_to_encode].copy()
+    # One-hot encode categorical features from the indexed DataFrame
+    # Select only the categorical columns for get_dummies
+    categorical_data_indexed = df_for_processing_indexed[categorical_to_encode]
+    features_one_hot_df = pd.get_dummies(categorical_data_indexed, columns=categorical_to_encode, prefix=categorical_to_encode)
     
-    # Set 'establishment_id' as index before get_dummies to align features correctly
-    df_for_encoding_indexed = df_for_encoding.set_index('establishment_id')
+    # --- Numerical Feature Processing ---
+    scaled_numerical_features_list = [] # To store DataFrames of scaled numerical features
 
-    # Apply one-hot encoding. The original columns listed in categorical_to_encode are dropped
-    # and replaced by their one-hot encoded counterparts.
-    features_one_hot_df = pd.get_dummies(df_for_encoding_indexed, columns=categorical_to_encode, prefix=categorical_to_encode)
+    if numerical_feature_cols:
+        present_numerical_cols = [col for col in numerical_feature_cols if col in df_for_processing_indexed.columns]
+        missing_numerical_cols = [col for col in numerical_feature_cols if col not in df_for_processing_indexed.columns]
+
+        if missing_numerical_cols:
+            print(f"Warning: Specified numerical columns not found in nodes_df and will be skipped: {missing_numerical_cols}")
+
+        if present_numerical_cols:
+            # Select numerical data using the same index as features_one_hot_df
+            numerical_data = df_for_processing_indexed[present_numerical_cols].copy() 
+            
+            # Impute NaNs (e.g., with 0 or mean). Using 0 for simplicity.
+            # Consider a more sophisticated strategy if appropriate for the data.
+            for col in present_numerical_cols: # Iterate to handle mixed types if any column is object type due to NaNs
+                if numerical_data[col].isnull().any():
+                    if pd.api.types.is_numeric_dtype(numerical_data[col]):
+                        numerical_data[col].fillna(0, inplace=True) # Fill with 0 for numeric types
+                    else:
+                        # This case should ideally not happen if columns are truly numerical.
+                        # If a column is object type (e.g. due to mixed strings/numbers and NaNs),
+                        # scaling will fail. Convert to numeric or raise error.
+                        try:
+                            numerical_data[col] = pd.to_numeric(numerical_data[col].fillna(0))
+                        except ValueError:
+                            print(f"Warning: Column '{col}' could not be converted to numeric after fillna(0) and will be skipped for scaling.")
+                            present_numerical_cols.remove(col) # Remove from list to scale
+                            continue # Skip this column for scaling
+
+            if not numerical_data.empty and present_numerical_cols: # Check if any valid numerical columns remain
+                 # Re-select valid columns in case some were dropped
+                numerical_data_to_scale = numerical_data[present_numerical_cols]
+                if not numerical_data_to_scale.empty:
+                    scaler = StandardScaler()
+                    scaled_data_np = scaler.fit_transform(numerical_data_to_scale)
+                    
+                    # Create DataFrame for scaled numerical features, maintaining index and column names
+                    scaled_numerical_df = pd.DataFrame(scaled_data_np, columns=present_numerical_cols, index=df_for_processing_indexed.index)
+                    scaled_numerical_features_list.append(scaled_numerical_df)
+                else:
+                    print("Warning: No valid numerical columns left to scale after type checks.")
+            else:
+                print("Warning: No numerical data to scale after filtering and NaN handling.")
+        else:
+            print("Warning: None of the specified numerical_feature_cols were found in the DataFrame.")
+
+    # --- Combine Features ---
+    # Start with the one-hot encoded features
+    combined_features_df = features_one_hot_df
+
+    # Concatenate scaled numerical features if any were processed
+    if scaled_numerical_features_list:
+        for scaled_df in scaled_numerical_features_list:
+            combined_features_df = pd.concat([combined_features_df, scaled_df], axis=1)
     
-    # Reset index so 'establishment_id' becomes a column again.
-    # features_df_final will contain 'establishment_id' and only the numeric one-hot encoded columns.
-    features_df_final = features_one_hot_df.reset_index()
+    # Reset index so 'establishment_id' becomes a column again, matching original function's contract
+    features_df_final = combined_features_df.reset_index()
     
-    # The feature names are all columns in features_df_final except 'establishment_id'.
-    # These are the names of the columns that will form the node feature matrix 'x'.
+    # Feature names are all columns except 'establishment_id'
     feature_names = [col for col in features_df_final.columns if col != 'establishment_id']
     
     return features_df_final, feature_names

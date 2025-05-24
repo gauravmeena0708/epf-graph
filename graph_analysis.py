@@ -433,3 +433,205 @@ if __name__ == '__main__':
             print("Skipping bridge establishments as no communities were detected or partition failed.")
             
     print("\n--- graph_analysis.py direct execution finished ---")
+
+
+def get_churn_analysis_by_attribute(G, nodes_df, edges_df, attribute_name='industry'):
+    """
+    Calculates member flow metrics aggregated by a specified node attribute (e.g., industry, city)
+    to identify attributes with high average outgoing members per establishment (proxy for churn).
+
+    Args:
+        G (networkx.Graph): The NetworkX graph. While not strictly used for calculations if
+                            nodes_df and edges_df are comprehensive, it's kept for API consistency.
+        nodes_df (pd.DataFrame): DataFrame with node attributes, including 'establishment_id'
+                                 and the column specified by `attribute_name`.
+        edges_df (pd.DataFrame): DataFrame with transfer data, including 'source_establishment_id',
+                                 'target_establishment_id', and 'members_transferred'.
+        attribute_name (str, optional): The node attribute to group by. Defaults to 'industry'.
+
+    Returns:
+        pd.DataFrame: A DataFrame sorted by `avg_outgoing_members_per_establishment` (descending),
+                      showing churn-related metrics for each group of the specified attribute.
+                      Columns include: [attribute_name], 'num_establishments',
+                      'total_incoming_members_group', 'total_outgoing_members_group',
+                      'net_member_flow_group', 'avg_outgoing_members_per_establishment'.
+    Raises:
+        ValueError: If `attribute_name` is not a column in `nodes_df` or if essential columns
+                    are missing from `nodes_df` or `edges_df`.
+    """
+    if 'establishment_id' not in nodes_df.columns:
+        raise ValueError("nodes_df must contain 'establishment_id' column.")
+    if attribute_name not in nodes_df.columns:
+        raise ValueError(f"Attribute '{attribute_name}' not found in nodes_df columns.")
+    
+    required_edge_cols = ['source_establishment_id', 'target_establishment_id', 'members_transferred']
+    if not all(col in edges_df.columns for col in required_edge_cols):
+        raise ValueError(f"edges_df must contain all of the following columns: {required_edge_cols}")
+
+    # Calculate total_in and total_out per establishment
+    incoming_agg = edges_df.groupby('target_establishment_id')['members_transferred'].sum().reset_index()
+    incoming_agg = incoming_agg.rename(columns={'target_establishment_id': 'establishment_id', 
+                                                'members_transferred': 'total_members_in'})
+
+    outgoing_agg = edges_df.groupby('source_establishment_id')['members_transferred'].sum().reset_index()
+    outgoing_agg = outgoing_agg.rename(columns={'source_establishment_id': 'establishment_id', 
+                                                'members_transferred': 'total_members_out'})
+
+    # Merge with nodes_df to ensure all establishments are included and to get attributes
+    # We need a copy of nodes_df to avoid modifying the original DataFrame passed to the function
+    flow_df = nodes_df[['establishment_id', attribute_name]].copy()
+    flow_df = pd.merge(flow_df, incoming_agg, on='establishment_id', how='left')
+    flow_df = pd.merge(flow_df, outgoing_agg, on='establishment_id', how='left')
+    
+    # Fill NaNs with 0 for establishments with no incoming/outgoing transfers
+    flow_df[['total_members_in', 'total_members_out']] = flow_df[['total_members_in', 'total_members_out']].fillna(0)
+    
+    # Calculate net flow at establishment level (optional, not directly used in final aggregated output, but good for intermediate check)
+    # flow_df['net_member_flow_establishment'] = flow_df['total_members_in'] - flow_df['total_members_out']
+
+    # Aggregate by the specified attribute_name
+    # Ensure that the attribute_name column and the metrics columns are present for aggregation
+    if not flow_df.empty:
+        grouped_analysis = flow_df.groupby(attribute_name).agg(
+            num_establishments=('establishment_id', 'count'),
+            total_incoming_members_group=('total_members_in', 'sum'),
+            total_outgoing_members_group=('total_members_out', 'sum')
+        ).reset_index()
+    else: # Handle case where flow_df might be empty (e.g. if nodes_df was empty)
+        grouped_analysis = pd.DataFrame(columns=[
+            attribute_name, 'num_establishments', 
+            'total_incoming_members_group', 'total_outgoing_members_group'
+        ])
+
+
+    if not grouped_analysis.empty:
+        grouped_analysis['net_member_flow_group'] = grouped_analysis['total_incoming_members_group'] - grouped_analysis['total_outgoing_members_group']
+        
+        # Calculate churn proxy: avg_outgoing_members_per_establishment
+        # Handle division by zero if num_establishments is 0 for a group (though 'count' agg should prevent 0 if group exists)
+        grouped_analysis['avg_outgoing_members_per_establishment'] = grouped_analysis.apply(
+            lambda row: row['total_outgoing_members_group'] / row['num_establishments'] if row['num_establishments'] > 0 else 0,
+            axis=1
+        )
+        # Fill any NaN that might result from a group having 0 establishments (if possible after count)
+        grouped_analysis['avg_outgoing_members_per_establishment'].fillna(0, inplace=True)
+        
+        # Sort by the churn proxy in descending order
+        result_df = grouped_analysis.sort_values(by='avg_outgoing_members_per_establishment', ascending=False)
+    else: # If grouped_analysis is empty, ensure all required columns are present for consistency
+        result_df = pd.DataFrame(columns=[
+            attribute_name, 'num_establishments', 
+            'total_incoming_members_group', 'total_outgoing_members_group',
+            'net_member_flow_group', 'avg_outgoing_members_per_establishment'
+        ])
+        
+    return result_df
+
+
+if __name__ == '__main__':
+    from data import get_sample_data, create_graph_from_datasets 
+
+    print("--- graph_analysis.py executed directly for testing ---")
+    
+    establishments_data_dict, transfers_data_list, nodes_df_sample, edges_df_sample = get_sample_data()
+    G_sample_directed = create_graph_from_datasets(establishments_data_dict, transfers_data_list) # Original Directed Graph
+    
+    print(f"Sample graph created: {G_sample_directed.number_of_nodes()} nodes, {G_sample_directed.number_of_edges()} edges.")
+    if G_sample_directed.number_of_nodes() == 0:
+        print("Sample graph is empty. Skipping analyses.")
+    else:
+        # --- Test Establishment-Level Insights ---
+        print("\n--- Top Source Establishments ---")
+        print(get_top_source_establishments(G_sample_directed, top_n=3))
+        print("\n--- Top Destination Establishments ---")
+        print(get_top_destination_establishments(G_sample_directed, top_n=3))
+        print("\n--- Net Gainers/Losers ---")
+        print(get_net_gainers_losers(G_sample_directed).head())
+        print("\n--- Hub Establishments ---")
+        try:
+            print(get_hub_establishments(G_sample_directed, top_n=3))
+        except Exception as e: print(f"Could not calculate hub establishments: {e}")
+        print("\n--- Isolated vs. Connected Establishments ---")
+        isolated, _ = get_isolated_connected_establishments(G_sample_directed, min_degree_threshold=0)
+        print(f"Isolated IDs (degree 0): {isolated}")
+        
+        # --- Test Transfer Pattern Insights ---
+        print("\n--- Dominant Transfer Routes ---")
+        print(get_dominant_transfer_routes(G_sample_directed, top_n=3))
+        print("\n--- Reciprocal Transfers (min 1 one way) ---")
+        print(get_reciprocal_transfers(G_sample_directed, min_transfers_oneway=1))
+
+        it_industry = "Information Technology"
+        man_industry = "Manufacturing"
+        city_bglr = "Bangalore"
+        size_large = "Large"
+        size_small = "Small"
+
+        print(f"\n--- Industry Transfer Patterns (Intra-Industry: {it_industry}) ---")
+        subgraph_it, intra_it_transfers_df = get_industry_transfer_patterns(G_sample_directed, industry_A=it_industry)
+        if subgraph_it.number_of_nodes() > 0 : print(intra_it_transfers_df.head())
+        else: print(intra_it_transfers_df)
+        
+        print(f"\n--- Industry Transfer Patterns (Inter-Industry: {man_industry} to {it_industry}) ---")
+        print(get_industry_transfer_patterns(G_sample_directed, industry_A=man_industry, industry_B=it_industry).head())
+        
+        # --- Test Network Structure & Community Insights ---
+        print("\n--- Network Density ---")
+        density_directed = get_network_density(G_sample_directed)
+        print(f"The density of the original directed graph is: {density_directed:.4f}")
+        
+        # For community detection and density of undirected version
+        G_community_analysis = G_sample_directed.to_undirected()
+        # Copy weights for Louvain if they exist in directed graph
+        for u, v, data in G_sample_directed.edges(data=True):
+            if G_community_analysis.has_edge(u, v):
+                G_community_analysis[u][v]['weight'] = data.get('weight', 1)
+        
+        density_undirected = get_network_density(G_community_analysis)
+        print(f"The density of the undirected graph (for community analysis) is: {density_undirected:.4f}")
+
+        print("\n--- Community Detection (on Undirected Graph with Weights) ---")
+        partition = {} # Initialize partition
+        try:
+            # Pass the graph G_community_analysis which is undirected and has weights
+            # detect_communities will add 'community_id' to nodes of G_community_analysis
+            communities_df, partition = detect_communities(G_community_analysis) 
+            print(communities_df.head())
+            
+            # To use bridge detection on original G_sample_directed, we need community IDs on its nodes.
+            # We can copy them from G_community_analysis if the node sets are identical.
+            if partition:
+                 nx.set_node_attributes(G_sample_directed, {node_id: G_community_analysis.nodes[node_id].get('community_id') 
+                                                      for node_id in G_community_analysis.nodes()}, 'community_id')
+
+
+        except community_louvain.LouvainArgumentError as lae:
+            print(f"Louvain argument error: {lae}. This can happen with very small or disconnected graphs.")
+        except Exception as e:
+            print(f"Community detection failed: {e}")
+            print("Ensure 'python-louvain' is installed and the graph is suitable (e.g., connected components).")
+
+        if partition: 
+            print("\n--- Bridge Establishments (on Original Directed Graph with Community Info) ---")
+            # G_sample_directed now has 'community_id' attributes if partition was successful
+            bridge_nodes_df = get_bridge_establishments(G_sample_directed, partition) 
+            print(bridge_nodes_df.head())
+        else:
+            print("Skipping bridge establishments as no communities were detected or partition failed.")
+
+        # --- Test get_churn_analysis_by_attribute ---
+        print("\n--- Churn Analysis by Industry ---")
+        if not nodes_df_sample.empty and not edges_df_sample.empty:
+            churn_by_industry_df = get_churn_analysis_by_attribute(G_sample_directed, nodes_df_sample, edges_df_sample, attribute_name='industry')
+            print(churn_by_industry_df)
+        else:
+            print("Skipping churn analysis by industry due to empty sample nodes_df or edges_df.")
+
+        print("\n--- Churn Analysis by City ---")
+        if not nodes_df_sample.empty and not edges_df_sample.empty:
+            churn_by_city_df = get_churn_analysis_by_attribute(G_sample_directed, nodes_df_sample, edges_df_sample, attribute_name='city')
+            print(churn_by_city_df)
+        else:
+            print("Skipping churn analysis by city due to empty sample nodes_df or edges_df.")
+            
+    print("\n--- graph_analysis.py direct execution finished ---")
