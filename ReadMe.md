@@ -98,6 +98,10 @@ The `run_analysis.py` script is the primary way to perform static graph analyses
         ```bash
         python run_analysis.py --data_source csv --nodes_csv path/to/my_nodes.csv --edges_csv path/to/my_edges.csv --run_establishment_insights
         ```
+    5. Run Insights using location
+       ```bash
+       python run_analysis.py --run_transfer_insights --industry_A "Information Technology" --location_A Bangalore
+       ```
 
 ## 7. Running Temporal Link Prediction (via `main.py`)
 The `main.py` script handles temporal link prediction using a GNN model (typically a GCN-LSTM or similar architecture) built with PyTorch Geometric.
