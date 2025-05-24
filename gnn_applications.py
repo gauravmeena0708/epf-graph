@@ -48,10 +48,11 @@ def load_establishment_data(nodes_filepath="epfo_establishments_nodes.csv", edge
 
 def preprocess_node_features(nodes_df):
     """
-    Preprocesses node features by applying one-hot encoding to categorical attributes.
+    Preprocesses node features by applying one-hot encoding to specified categorical attributes.
 
-    Categorical features 'industry', 'city', and 'size_category' are one-hot encoded.
-    The 'establishment_id' column is preserved.
+    Only 'industry', 'city', and 'size_category' are one-hot encoded. Other columns like 'name'
+    are excluded from the final feature set to ensure a purely numeric feature matrix.
+    The 'establishment_id' column is preserved for mapping.
 
     Args:
         nodes_df (pd.DataFrame): DataFrame containing node information, including 'establishment_id'.
@@ -59,10 +60,9 @@ def preprocess_node_features(nodes_df):
 
     Returns:
         tuple:
-            - features_df (pd.DataFrame): DataFrame with 'establishment_id' and one-hot encoded features.
-                                           Original categorical columns are replaced by their one-hot encoded counterparts.
-            - feature_cols (list): List of strings representing the names of the generated feature columns
-                                   (i.e., all columns in `features_df` except 'establishment_id').
+            - features_df_final (pd.DataFrame): DataFrame with 'establishment_id' and one-hot encoded features.
+                                                This DataFrame only contains numeric features suitable for tensor conversion.
+            - feature_names (list): List of strings representing the names of the generated one-hot encoded feature columns.
     Raises:
         ValueError: If 'establishment_id' column is missing or if any of the expected
                     categorical feature columns ('industry', 'city', 'size_category') are missing.
@@ -70,29 +70,33 @@ def preprocess_node_features(nodes_df):
     if 'establishment_id' not in nodes_df.columns:
         raise ValueError("nodes_df must contain 'establishment_id' column.")
 
-    # Set establishment_id as index for easy mapping later, and to avoid it being processed as a feature
-    # Make a copy to avoid SettingWithCopyWarning if nodes_df is a slice
-    nodes_df_indexed = nodes_df.copy().set_index('establishment_id')
+    categorical_to_encode = ['industry', 'city', 'size_category']
 
-    categorical_features = ['industry', 'city', 'size_category']
-    
-    # Ensure all categorical features are present
-    missing_cols = [col for col in categorical_features if col not in nodes_df_indexed.columns]
+    # Ensure all specified categorical features are present in the input nodes_df
+    missing_cols = [col for col in categorical_to_encode if col not in nodes_df.columns]
     if missing_cols:
-        raise ValueError(f"Missing categorical columns in nodes_df: {missing_cols}")
+        raise ValueError(f"Missing expected categorical columns in nodes_df for one-hot encoding: {missing_cols}")
 
-    # Apply one-hot encoding using pandas.get_dummies
-    # This will create new columns for each category within each feature, prefixed accordingly.
-    features_df_encoded = pd.get_dummies(nodes_df_indexed, columns=categorical_features, prefix=categorical_features)
+    # Select only the establishment_id and the categorical columns for one-hot encoding.
+    # This explicitly excludes other columns (like 'name') from being part of the feature matrix.
+    df_for_encoding = nodes_df[['establishment_id'] + categorical_to_encode].copy()
     
-    # Reset index so 'establishment_id' becomes a column again
-    features_df_encoded = features_df_encoded.reset_index()
+    # Set 'establishment_id' as index before get_dummies to align features correctly
+    df_for_encoding_indexed = df_for_encoding.set_index('establishment_id')
+
+    # Apply one-hot encoding. The original columns listed in categorical_to_encode are dropped
+    # and replaced by their one-hot encoded counterparts.
+    features_one_hot_df = pd.get_dummies(df_for_encoding_indexed, columns=categorical_to_encode, prefix=categorical_to_encode)
     
-    # The feature columns are all columns except 'establishment_id'
+    # Reset index so 'establishment_id' becomes a column again.
+    # features_df_final will contain 'establishment_id' and only the numeric one-hot encoded columns.
+    features_df_final = features_one_hot_df.reset_index()
+    
+    # The feature names are all columns in features_df_final except 'establishment_id'.
     # These are the names of the columns that will form the node feature matrix 'x'.
-    feature_cols = [col for col in features_df_encoded.columns if col != 'establishment_id']
+    feature_names = [col for col in features_df_final.columns if col != 'establishment_id']
     
-    return features_df_encoded, feature_cols
+    return features_df_final, feature_names
 
 
 def create_pyg_data_object(nx_graph, processed_node_features_df, original_nodes_df, feature_cols):
@@ -111,6 +115,7 @@ def create_pyg_data_object(nx_graph, processed_node_features_df, original_nodes_
         nx_graph (networkx.Graph): The input graph. Node IDs are expected to be 'establishment_id'.
         processed_node_features_df (pd.DataFrame): DataFrame with 'establishment_id' and one-hot encoded features.
                                                    The columns listed in `feature_cols` will form the node features.
+                                                   This DataFrame should only contain numeric features and the ID.
         original_nodes_df (pd.DataFrame): The original nodes DataFrame, used to extract labels.
                                           Must contain 'establishment_id', and label columns like
                                           'industry', 'city', 'size_category'.
@@ -128,80 +133,75 @@ def create_pyg_data_object(nx_graph, processed_node_features_df, original_nodes_
     if 'establishment_id' not in original_nodes_df.columns:
         raise ValueError("original_nodes_df must contain 'establishment_id' column.")
 
-    # Create a mapping from establishment_id to a continuous integer index (0 to N-1)
-    # It's crucial that graph_nodes are the same IDs present in the feature and original node DataFrames.
-    graph_nodes_original_ids = list(nx_graph.nodes()) # These are the 'establishment_id's
+    graph_nodes_original_ids = list(nx_graph.nodes()) 
     node_id_map = {node_id: i for i, node_id in enumerate(graph_nodes_original_ids)}
     
-    # Align processed_node_features_df with the graph node order for feature matrix 'x'
-    # Set 'establishment_id' as index for efficient lookup using .reindex()
     features_df_indexed = processed_node_features_df.set_index('establishment_id')
-    # Reorder rows according to graph_nodes_original_ids and select only feature_cols
-    aligned_features = features_df_indexed.reindex(graph_nodes_original_ids)[feature_cols]
     
-    # Handle cases where nodes in the graph might not have features in processed_node_features_df
-    if aligned_features.isnull().values.any():
-        # Identify nodes that are in the graph but for which features are missing (NaN after reindex)
-        missing_feature_nodes = aligned_features[aligned_features.isnull().any(axis=1)].index.tolist()
-        print(f"Warning: Nodes {missing_feature_nodes} are in the graph but missing features. Filling with zeros.")
-        # Fill NaN values with 0. This is a common strategy but might not be optimal for all cases.
-        aligned_features = aligned_features.fillna(0) 
+    # Ensure feature_cols only contains columns present in features_df_indexed
+    # This is a safeguard, though preprocess_node_features should ensure this.
+    valid_feature_cols = [col for col in feature_cols if col in features_df_indexed.columns]
+    if len(valid_feature_cols) != len(feature_cols):
+        print(f"Warning: Some feature_cols were not found in processed_node_features_df. Using valid subset.")
+        # This situation ideally shouldn't happen if preprocess_node_features is correct.
+    
+    aligned_features_df = features_df_indexed.reindex(graph_nodes_original_ids)[valid_feature_cols]
+    
+    if aligned_features_df.isnull().values.any():
+        missing_feature_nodes = aligned_features_df[aligned_features_df.isnull().any(axis=1)].index.tolist()
+        print(f"Warning: Nodes {missing_feature_nodes} are in the graph but missing features after reindexing. Filling with zeros.")
+        aligned_features_df = aligned_features_df.fillna(0) 
 
-    # Convert the aligned feature DataFrame to a PyTorch tensor
-    x = torch.tensor(aligned_features.values, dtype=torch.float)
+    # Convert the aligned feature DataFrame values to a NumPy array and then to a PyTorch tensor
+    # Ensure the underlying NumPy array is of a numeric type before tensor conversion.
+    # pd.get_dummies typically creates uint8, which is fine. fillna(0) also maintains numeric.
+    try:
+        # Explicitly convert to a numeric type like float32 if there's any doubt,
+        # though pandas should handle this with get_dummies and fillna(0).
+        # The .values attribute gives a NumPy array.
+        feature_values_np = aligned_features_df.values.astype(np.float32) 
+        x = torch.tensor(feature_values_np, dtype=torch.float)
+    except Exception as e:
+        print(f"Error converting features to tensor. DataFrame dtypes: {aligned_features_df.dtypes}")
+        raise e
 
-    # Create edge_index and edge_attr (edge features, typically weights)
+
     edge_list = []
     edge_attributes_list = []
     for u_orig, v_orig, edge_data_dict in nx_graph.edges(data=True):
-        # Map original node IDs (establishment_id) to their integer indices
-        if u_orig in node_id_map and v_orig in node_id_map: # Ensure both nodes are in our map
+        if u_orig in node_id_map and v_orig in node_id_map: 
             u_mapped, v_mapped = node_id_map[u_orig], node_id_map[v_orig]
             edge_list.append((u_mapped, v_mapped))
-            # Assume 'weight' attribute exists for edges, as per data.py's typical output.
-            # Default to 1.0 if no 'weight' attribute is found on an edge.
             edge_attributes_list.append(edge_data_dict.get('weight', 1.0))
-        # else:
-            # print(f"Warning: Edge ({u_orig}, {v_orig}) contains nodes not in node_id_map. Skipping this edge.")
 
-
-    if not edge_list: # Handle graphs with no edges or where all edges were skipped
-        edge_index = torch.empty((2, 0), dtype=torch.long) # Shape [2, num_edges]
-        edge_attr = torch.empty((0, 1), dtype=torch.float) # Shape [num_edges, num_edge_features]
+    if not edge_list: 
+        edge_index = torch.empty((2, 0), dtype=torch.long) 
+        edge_attr = torch.empty((0, 1), dtype=torch.float) 
     else:
-        # Convert edge list to PyTorch tensor for edge_index (shape [2, num_edges])
         edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
-        # Convert edge attributes to PyTorch tensor (shape [num_edges, num_edge_features])
-        edge_attr = torch.tensor(edge_attributes_list, dtype=torch.float).unsqueeze(1) # Make it [num_edges, 1]
+        edge_attr = torch.tensor(edge_attributes_list, dtype=torch.float).unsqueeze(1) 
 
-    # Create the PyG Data object
     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
 
-    # Store original labels (e.g., industry, city) on the Data object
-    # Align original_nodes_df with the graph node order for labels
     original_nodes_df_indexed = original_nodes_df.set_index('establishment_id')
     aligned_original_nodes_for_labels = original_nodes_df_indexed.reindex(graph_nodes_original_ids)
 
     label_column_names = ['industry', 'city', 'size_category']
+    data.label_encoders = {}
+
     for col_name in label_column_names:
         if col_name in aligned_original_nodes_for_labels:
             le = LabelEncoder()
-            # Handle potential NaNs in label columns before encoding, treat them as an 'Unknown' category
-            # Ensure labels are string type for consistent encoding
             labels_str = aligned_original_nodes_for_labels[col_name].fillna('Unknown').astype(str)
             encoded_labels = le.fit_transform(labels_str)
             
-            # Store encoded labels as y_<label_name> (e.g., data.y_industry)
             setattr(data, f'y_{col_name}', torch.tensor(encoded_labels, dtype=torch.long))
-            # Store the mapping from encoded integer back to original string label for interpretation
             setattr(data, f'y_{col_name}_mapping', {i: cls_name for i, cls_name in enumerate(le.classes_)})
-        # else:
-            # print(f"Warning: Label column '{col_name}' not found in original_nodes_df.")
+            data.label_encoders[col_name] = le
 
-    # Store mapping information and original IDs on the Data object for convenience
-    data.node_id_map = node_id_map # Maps 'establishment_id' to 0-based integer index
-    data.idx_to_node_id = {v: k for k, v in node_id_map.items()} # Maps integer index back to 'establishment_id'
-    data.establishment_ids = graph_nodes_original_ids # List of 'establishment_id's in the order of the graph nodes
+    data.node_id_map = node_id_map 
+    data.idx_to_node_id = {v: k for k, v in node_id_map.items()} 
+    data.establishment_ids = graph_nodes_original_ids 
 
     return data, node_id_map
 
@@ -543,7 +543,8 @@ def train_node_classifier(model: NodeClassifier, data: Data,
                 val_acc = accuracy_score(y_true[val_mask].cpu().numpy(), predicted_labels_val.cpu().numpy())
                 log_message += f", Val Loss: {val_loss.item():.4f}, Val Acc: {val_acc:.4f}"
         
-        print(log_message)
+        if epoch % 10 == 0 or epoch == n_epochs -1 : # Print every 10 epochs or last epoch
+            print(log_message)
 
     return model
 
@@ -688,7 +689,8 @@ def cluster_nodes_kmeans(embeddings: np.ndarray, n_clusters: int, random_state: 
         if n_clusters <= 1 : reason += f"n_clusters ({n_clusters}) <= 1 "
         if n_clusters >= embeddings.shape[0]: reason += f"n_clusters ({n_clusters}) >= n_samples ({embeddings.shape[0]}) "
         
-        print(f"Silhouette score not computed or invalid: {reason.strip()}.")
+        if reason: # Only print if there's a specific reason identified
+            print(f"Silhouette score not computed or invalid: {reason.strip()}.")
 
     return cluster_labels, silhouette_avg
 
@@ -926,695 +928,4 @@ def get_anomalies_by_error(reconstruction_errors: np.ndarray,
     node_errors.sort(key=lambda item: item[1], reverse=True)
     
     # Return the top_n anomalies
-    return node_errors[:top_n]
-from torch_geometric.data import Data
-from torch_geometric.nn import GCNConv, SAGEConv, GATConv
-from torch_geometric.utils import to_networkx, from_networkx, negative_sampling # Add other PyG utils as needed
-
-import networkx as nx
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.cluster import KMeans
-from sklearn.metrics import roc_auc_score, accuracy_score, silhouette_score
-# Add other sklearn utilities as needed, e.g., for anomaly detection or other metrics
-
-# Standard Python libraries
-import random
-from collections import Counter
-
-# Assuming data.py is in the same directory or accessible via PYTHONPATH
-from data import load_graph_data
-
-
-def load_establishment_data(nodes_filepath="epfo_establishments_nodes.csv", edges_filepath="epfo_transfers_edges.csv"):
-    """
-    Loads graph data (NetworkX graph, nodes DataFrame, edges DataFrame) from specified CSV files.
-
-    Args:
-        nodes_filepath (str): Path to the CSV file containing node information.
-        edges_filepath (str): Path to the CSV file containing edge information.
-
-    Returns:
-        tuple: nx_graph (networkx.Graph), nodes_df (pd.DataFrame), edges_df (pd.DataFrame)
-    """
-    nx_graph, nodes_df, edges_df = load_graph_data(nodes_filepath, edges_filepath)
-    return nx_graph, nodes_df, edges_df
-
-
-def preprocess_node_features(nodes_df):
-    """
-    Preprocesses node features by applying one-hot encoding to categorical attributes.
-
-    Args:
-        nodes_df (pd.DataFrame): DataFrame containing node information, including 'establishment_id'.
-                                 Expected to have 'industry', 'city', 'size_category' columns.
-
-    Returns:
-        tuple: 
-            - features_df (pd.DataFrame): DataFrame with 'establishment_id' and one-hot encoded features.
-            - feature_cols (list): List of strings representing the names of the feature columns.
-    """
-    if 'establishment_id' not in nodes_df.columns:
-        raise ValueError("nodes_df must contain 'establishment_id' column.")
-
-    # Set establishment_id as index for easy mapping later, and to avoid it being processed as a feature
-    nodes_df_indexed = nodes_df.set_index('establishment_id')
-
-    categorical_features = ['industry', 'city', 'size_category']
-    
-    # Ensure all categorical features are present
-    missing_cols = [col for col in categorical_features if col not in nodes_df_indexed.columns]
-    if missing_cols:
-        raise ValueError(f"Missing categorical columns in nodes_df: {missing_cols}")
-
-    # Apply one-hot encoding
-    features_df = pd.get_dummies(nodes_df_indexed, columns=categorical_features, prefix=categorical_features)
-    
-    # Get the names of the new feature columns
-    # Exclude original columns that were not one-hot encoded if any remain,
-    # though in this setup, all except 'establishment_id' (which is index) are either categorical or dropped.
-    # If there were other numerical features, they would be preserved.
-    # For now, we assume only categorical are present besides id.
-    
-    # Reset index so 'establishment_id' becomes a column again
-    features_df = features_df.reset_index()
-    
-    # The feature columns are all columns except 'establishment_id'
-    feature_cols = [col for col in features_df.columns if col != 'establishment_id']
-    
-    # If there were other non-categorical features in the original nodes_df_indexed that should be features,
-    # they would already be in features_df.
-    # For example, if 'age' was a numerical column, it would be carried over.
-    # feature_cols would then be pd.get_dummies_columns + original_numerical_columns.
-
-    return features_df, feature_cols
-
-
-def create_pyg_data_object(nx_graph, processed_node_features_df, original_nodes_df, feature_cols):
-    """
-    Creates a PyTorch Geometric Data object from a NetworkX graph and processed node features.
-
-    Args:
-        nx_graph (networkx.Graph): The input graph.
-        processed_node_features_df (pd.DataFrame): DataFrame with 'establishment_id' and one-hot encoded features.
-        original_nodes_df (pd.DataFrame): The original nodes DataFrame, used to extract labels.
-                                          Must contain 'establishment_id', 'industry', 'city', 'size_category'.
-        feature_cols (list): List of column names that constitute the features in processed_node_features_df.
-
-    Returns:
-        torch_geometric.data.Data: A PyG Data object.
-        dict: node_id_map ({establishment_id: integer_index})
-    """
-    if 'establishment_id' not in processed_node_features_df.columns:
-        raise ValueError("processed_node_features_df must contain 'establishment_id' column.")
-    if 'establishment_id' not in original_nodes_df.columns:
-        raise ValueError("original_nodes_df must contain 'establishment_id' column.")
-
-    # Create a mapping from establishment_id to a continuous integer index (0 to N-1)
-    # Important: Ensure all nodes in nx_graph are present in processed_node_features_df and original_nodes_df
-    # For simplicity, we assume nx_graph.nodes() are the establishment_ids.
-    # If nx_graph might have nodes not in dataframes, filtering or error handling is needed.
-    
-    graph_nodes = list(nx_graph.nodes())
-    node_id_map = {node_id: i for i, node_id in enumerate(graph_nodes)}
-    
-    num_nodes = len(graph_nodes)
-
-    # Align processed_node_features_df with the graph node order
-    # Set 'establishment_id' as index for quick lookup
-    features_df_indexed = processed_node_features_df.set_index('establishment_id')
-    # Reindex based on graph_nodes order and select feature_cols
-    # If an establishment_id from graph_nodes is not in features_df_indexed, it will result in NaNs.
-    # This needs careful handling, e.g., ensuring all graph nodes have features.
-    # For now, assume all nodes in nx_graph are in processed_node_features_df.
-    aligned_features = features_df_indexed.reindex(graph_nodes)[feature_cols]
-    
-    # Check for missing features after alignment (nodes in graph but not in features_df)
-    if aligned_features.isnull().values.any():
-        missing_nodes = aligned_features[aligned_features.isnull().any(axis=1)].index.tolist()
-        # print(f"Warning: Nodes {missing_nodes} are in the graph but missing features. Filling with zeros.")
-        # Option: fill NaNs, or raise error, or ensure data integrity upstream.
-        # For now, let's fill with zeros, though this might not be ideal for all cases.
-        aligned_features = aligned_features.fillna(0) 
-
-
-    x = torch.tensor(aligned_features.values, dtype=torch.float)
-
-    # Create edge_index
-    # Edges in nx_graph can be (u, v) or (u, v, data_dict)
-    # We need to map u and v to their integer indices
-    edge_list = []
-    edge_attributes = []
-    for u, v, data in nx_graph.edges(data=True):
-        if u in node_id_map and v in node_id_map: # Ensure both nodes are in the map
-            edge_list.append((node_id_map[u], node_id_map[v]))
-            # Assuming 'weight' attribute exists for edges, as per data.py
-            edge_attributes.append(data.get('weight', 1.0)) # Default to 1.0 if no weight
-        # else:
-            # print(f"Warning: Edge ({u}, {v}) contains nodes not in node_id_map. Skipping this edge.")
-
-
-    if not edge_list:
-        # Handle case with no edges or all edges skipped
-        edge_index = torch.empty((2, 0), dtype=torch.long)
-        edge_attr = torch.empty((0,1), dtype=torch.float) # Assuming edge_attr is 1D per edge
-    else:
-        edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
-        edge_attr = torch.tensor(edge_attributes, dtype=torch.float).unsqueeze(1) # Make it [num_edges, 1]
-
-    data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
-
-    # Store original labels
-    # Align original_nodes_df with the graph node order
-    original_nodes_df_indexed = original_nodes_df.set_index('establishment_id')
-    aligned_original_nodes = original_nodes_df_indexed.reindex(graph_nodes)
-
-    label_cols = ['industry', 'city', 'size_category']
-    for col in label_cols:
-        if col in aligned_original_nodes:
-            # Convert string labels to numerical representation (e.g., using LabelEncoder)
-            # then to tensor. For PyG, these are often stored directly on the data object.
-            le = LabelEncoder()
-            # Handle potential NaNs in label columns before encoding
-            labels = aligned_original_nodes[col].fillna('Unknown').astype(str)
-            encoded_labels = le.fit_transform(labels)
-            setattr(data, f'y_{col}', torch.tensor(encoded_labels, dtype=torch.long))
-            # Store the mapping from encoded label to original string label
-            setattr(data, f'y_{col}_mapping', {i: cls for i, cls in enumerate(le.classes_)})
-        # else:
-            # print(f"Warning: Label column '{col}' not found in original_nodes_df.")
-
-
-    # Add node_id_map to the data object for easy reference
-    data.node_id_map = node_id_map
-    # Also store the reverse map if needed
-    data.idx_to_node_id = {v: k for k, v in node_id_map.items()}
-    
-    # Store establishment_ids in their mapped order
-    data.establishment_ids = graph_nodes
-
-
-    return data, node_id_map
-
-
-# GNN Encoder Architectures
-
-class GCNEncoder(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5):
-        super().__init__()
-        self.convs = torch.nn.ModuleList()
-        self.dropout = torch.nn.Dropout(dropout_rate)
-        self.num_layers = num_layers
-
-        if num_layers < 1:
-            raise ValueError("Number of layers must be at least 1.")
-
-        if num_layers == 1:
-            self.convs.append(GCNConv(in_channels, out_channels))
-        else:
-            # First layer
-            self.convs.append(GCNConv(in_channels, hidden_channels))
-            # Intermediate layers
-            for _ in range(num_layers - 2):
-                self.convs.append(GCNConv(hidden_channels, hidden_channels))
-            # Final layer
-            self.convs.append(GCNConv(hidden_channels, out_channels))
-
-    def forward(self, x, edge_index, edge_weight=None):
-        for i in range(self.num_layers):
-            x = self.convs[i](x, edge_index, edge_weight=edge_weight)
-            if i < self.num_layers - 1:  # Apply ReLU and Dropout to all but the last layer
-                x = F.relu(x)
-                x = self.dropout(x)
-        return x
-
-
-class SAGEEncoder(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5):
-        super().__init__()
-        self.convs = torch.nn.ModuleList()
-        self.dropout = torch.nn.Dropout(dropout_rate)
-        self.num_layers = num_layers
-
-        if num_layers < 1:
-            raise ValueError("Number of layers must be at least 1.")
-
-        if num_layers == 1:
-            self.convs.append(SAGEConv(in_channels, out_channels))
-        else:
-            # First layer
-            self.convs.append(SAGEConv(in_channels, hidden_channels))
-            # Intermediate layers
-            for _ in range(num_layers - 2):
-                self.convs.append(SAGEConv(hidden_channels, hidden_channels))
-            # Final layer
-            self.convs.append(SAGEConv(hidden_channels, out_channels))
-
-    def forward(self, x, edge_index):
-        for i in range(self.num_layers):
-            x = self.convs[i](x, edge_index)
-            if i < self.num_layers - 1:  # Apply ReLU and Dropout to all but the last layer
-                x = F.relu(x)
-                x = self.dropout(x)
-        return x
-
-
-class GATEncoder(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5, heads=8):
-        super().__init__()
-        self.convs = torch.nn.ModuleList()
-        # Dropout for features between layers. GATConv has its own internal dropout for attention weights.
-        self.dropout = torch.nn.Dropout(dropout_rate) 
-        self.num_layers = num_layers
-        self.heads = heads
-
-        if num_layers < 1:
-            raise ValueError("Number of layers must be at least 1.")
-
-        current_in_channels = in_channels
-
-        if num_layers == 1:
-            # Final layer directly maps to out_channels, no intermediate hidden_channels * heads
-            # For the final layer in GAT, it's common to use heads=1 and concat=False
-            # The GATConv dropout is for attention coefficients, self.dropout is for features.
-            self.convs.append(GATConv(current_in_channels, out_channels, heads=1, concat=False, dropout=dropout_rate))
-        else:
-            # First layer
-            # The GATConv dropout is for attention coefficients.
-            self.convs.append(GATConv(current_in_channels, hidden_channels, heads=heads, concat=True, dropout=dropout_rate))
-            current_in_channels = hidden_channels * heads # Output of first layer
-
-            # Intermediate layers
-            for _ in range(num_layers - 2):
-                self.convs.append(GATConv(current_in_channels, hidden_channels, heads=heads, concat=True, dropout=dropout_rate))
-                current_in_channels = hidden_channels * heads
-            
-            # Final layer
-            # The GATConv dropout is for attention coefficients.
-            self.convs.append(GATConv(current_in_channels, out_channels, heads=1, concat=False, dropout=dropout_rate))
-
-
-    def forward(self, x, edge_index, edge_attr=None): # GATConv uses edge_attr for weighted attention
-        for i in range(self.num_layers):
-            # Pass edge_attr to GATConv layers
-            x = self.convs[i](x, edge_index, edge_attr=edge_attr)
-            if i < self.num_layers - 1:  # Apply ELU and Dropout to all but the last layer
-                x = F.elu(x)
-                x = self.dropout(x) # This is the feature dropout between layers
-        return x
-
-
-# Node Classification Components
-
-class NodeClassifier(torch.nn.Module):
-    def __init__(self, encoder: torch.nn.Module, num_classes: int):
-        super().__init__()
-        self.encoder = encoder
-        
-        # Ensure the encoder has an out_channels attribute (from its own GNN layers)
-        if not hasattr(encoder, 'convs') or not encoder.convs: # Basic check, assumes convs list
-             raise ValueError("Encoder does not seem to have layers or out_channels defined properly.")
-        
-        # Determine encoder's output channels.
-        # This depends on how out_channels is stored in the encoder.
-        # Assuming the last conv layer in encoder.convs has an 'out_channels' attribute
-        # or the encoder itself has an 'out_channels' attribute set.
-        encoder_out_channels = None
-        if hasattr(encoder, 'out_channels'): # If encoder itself stores it
-            encoder_out_channels = encoder.out_channels
-        elif hasattr(encoder.convs[-1], 'out_channels'): # Last layer of encoder
-            encoder_out_channels = encoder.convs[-1].out_channels
-        else: # Fallback for GAT which might have heads and concat affecting final size before last layer
-             # For GAT, the final layer is GATConv(..., out_channels, heads=1, concat=False, ...)
-             # So its out_channels is the direct output feature size.
-             # For other encoders, it's simpler.
-             # This logic might need refinement based on actual encoder attribute names.
-            if isinstance(encoder, GATEncoder):
-                 # The GATEncoder's last conv layer (self.convs[-1]) is designed to output `out_channels`
-                 # as specified in its constructor.
-                 encoder_out_channels = encoder.convs[-1].out_channels
-            else: # Default for GCN, SAGE
-                 encoder_out_channels = encoder.convs[-1].out_channels
-
-
-        if encoder_out_channels is None:
-            raise ValueError("Could not determine out_channels from the provided encoder.")
-
-        self.classifier_head = torch.nn.Linear(encoder_out_channels, num_classes)
-
-    def forward(self, data: Data) -> torch.Tensor:
-        # Get node embeddings
-        # data.edge_attr is assumed to be the edge weights/features
-        edge_feature_to_pass = data.edge_attr if hasattr(data, 'edge_attr') else None
-
-        if isinstance(self.encoder, GCNEncoder):
-            # GCNEncoder expects 'edge_weight'
-            embeddings = self.encoder(data.x, data.edge_index, edge_weight=edge_feature_to_pass)
-        elif isinstance(self.encoder, GATEncoder):
-            # GATEncoder expects 'edge_attr'
-            embeddings = self.encoder(data.x, data.edge_index, edge_attr=edge_feature_to_pass)
-        elif isinstance(self.encoder, SAGEEncoder):
-            # SAGEEncoder's basic form does not use edge attributes in its forward pass
-            embeddings = self.encoder(data.x, data.edge_index)
-        else:
-            # Fallback or error for unknown/unhandled encoder type
-            # Or try a generic call if the encoder has a standard signature (x, edge_index)
-            # For now, raise an error if specific handling isn't defined.
-            raise NotImplementedError(f"Encoder type {type(self.encoder).__name__} not specifically handled in NodeClassifier.")
-
-        # Pass these embeddings through the classification head
-        logits = self.classifier_head(embeddings)
-        return logits
-
-
-def train_node_classifier(model: NodeClassifier, data: Data, 
-                          target_label_name: str, 
-                          optimizer: torch.optim.Optimizer, 
-                          criterion: torch.nn.Module, 
-                          n_epochs: int = 100,
-                          pyg_data_object: Data = None): # pyg_data_object for potential future use, not strictly needed now
-    """
-    Trains a NodeClassifier model.
-    Assumes data object has 'train_mask' and optionally 'val_mask'.
-    If not, trains on all nodes with available labels.
-    """
-    y_true = getattr(data, f'y_{target_label_name}', None)
-    if y_true is None:
-        raise ValueError(f"Target label 'y_{target_label_name}' not found in data object.")
-
-    # Determine masks
-    train_mask = getattr(data, 'train_mask', None)
-    val_mask = getattr(data, 'val_mask', None)
-
-    if train_mask is None:
-        print("Warning: 'train_mask' not found in data. Training on all nodes.")
-        # Create a default train_mask: all nodes that have a valid label
-        # This assumes labels are dense. If labels can be missing (e.g. NaN or -1 before encoding),
-        # this should be more sophisticated. Given labels are already encoded, we assume all are valid.
-        train_mask = torch.ones(data.num_nodes, dtype=torch.bool)
-    
-    if not train_mask.any():
-        print("Warning: train_mask is empty or all False. No nodes to train on.")
-        return model # Or raise error
-
-    for epoch in range(n_epochs):
-        model.train()
-        optimizer.zero_grad()
-        
-        logits = model(data)
-        
-        loss = criterion(logits[train_mask], y_true[train_mask])
-        
-        loss.backward()
-        optimizer.step()
-        
-        print(f"Epoch {epoch+1}/{n_epochs}, Training Loss: {loss.item():.4f}", end="")
-
-        if val_mask is not None and val_mask.any():
-            model.eval()
-            with torch.no_grad():
-                val_logits = model(data)
-                val_loss = criterion(val_logits[val_mask], y_true[val_mask])
-                predicted_labels_val = val_logits[val_mask].argmax(dim=1)
-                val_acc = accuracy_score(y_true[val_mask].cpu().numpy(), predicted_labels_val.cpu().numpy())
-                print(f", Val Loss: {val_loss.item():.4f}, Val Acc: {val_acc:.4f}")
-        else:
-            print() # Newline if no validation
-
-    return model
-
-
-def evaluate_node_classifier(model: NodeClassifier, data: Data, 
-                             target_label_name: str, 
-                             test_mask_name: str = 'test_mask') -> float:
-    """
-    Evaluates the NodeClassifier model on a test set.
-    """
-    model.eval()
-    
-    y_true = getattr(data, f'y_{target_label_name}', None)
-    if y_true is None:
-        raise ValueError(f"Target label 'y_{target_label_name}' not found in data object.")
-
-    test_mask = getattr(data, test_mask_name, None)
-    if test_mask is None or not test_mask.any():
-        print(f"Warning: '{test_mask_name}' not found in data or is empty. Cannot evaluate.")
-        return float('nan')
-
-    with torch.no_grad():
-        logits = model(data)
-        
-    predicted_labels = logits[test_mask].argmax(dim=1)
-    
-    # Ensure y_true for the test set is on CPU for sklearn metrics
-    true_labels_test = y_true[test_mask].cpu().numpy()
-    predicted_labels_test = predicted_labels.cpu().numpy()
-    
-    acc = accuracy_score(true_labels_test, predicted_labels_test)
-    
-    return acc
-
-
-# Node Clustering Components
-
-def get_node_embeddings(encoder_model: torch.nn.Module, data: Data) -> np.ndarray:
-    """
-    Generates node embeddings using a trained GNN encoder model.
-
-    Args:
-        encoder_model (torch.nn.Module): The trained GNN encoder (e.g., GCNEncoder, SAGEEncoder, GATEncoder).
-        data (Data): The PyTorch Geometric Data object containing node features (data.x) 
-                     and graph structure (data.edge_index, data.edge_attr).
-
-    Returns:
-        np.ndarray: A NumPy array of node embeddings.
-    """
-    encoder_model.eval()
-    with torch.no_grad():
-        edge_feature_to_pass = data.edge_attr if hasattr(data, 'edge_attr') else None
-        
-        if isinstance(encoder_model, GCNEncoder):
-            embeddings = encoder_model(data.x, data.edge_index, edge_weight=edge_feature_to_pass)
-        elif isinstance(encoder_model, GATEncoder):
-            embeddings = encoder_model(data.x, data.edge_index, edge_attr=edge_feature_to_pass)
-        elif isinstance(encoder_model, SAGEEncoder):
-            embeddings = encoder_model(data.x, data.edge_index)
-        else:
-            raise TypeError(f"Unknown or unhandled encoder type: {type(encoder_model).__name__} passed to get_node_embeddings.")
-            
-    return embeddings.detach().cpu().numpy()
-
-
-def cluster_nodes_kmeans(embeddings: np.ndarray, n_clusters: int, random_state: int = 42) -> tuple[np.ndarray, float | None]:
-    """
-    Clusters node embeddings using K-Means and calculates the silhouette score.
-
-    Args:
-        embeddings (np.ndarray): A NumPy array of node embeddings.
-        n_clusters (int): The desired number of clusters.
-        random_state (int, optional): Seed for KMeans reproducibility. Defaults to 42.
-
-    Returns:
-        tuple:
-            - np.ndarray: Cluster labels assigned by KMeans.
-            - float | None: The silhouette score. Returns None if the score cannot be computed 
-                            (e.g., n_clusters <= 1 or n_clusters >= number of samples, or if KMeans fails).
-    """
-    if not isinstance(embeddings, np.ndarray):
-        raise TypeError("Embeddings must be a NumPy array.")
-    if embeddings.ndim != 2:
-        raise ValueError("Embeddings must be a 2D array (n_samples, n_features).")
-    if n_clusters <= 0:
-        raise ValueError("Number of clusters (n_clusters) must be greater than 0.")
-
-
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init='auto')
-    
-    try:
-        cluster_labels = kmeans.fit_predict(embeddings)
-    except Exception as e:
-        print(f"KMeans fitting failed: {e}")
-        # Depending on how critical this is, one might re-raise or return specific error indicators
-        # For now, return empty labels and None score if KMeans fails.
-        return np.array([]), None
-
-
-    silhouette_avg = None
-    # Silhouette score is only defined if number of labels is 2 <= n_labels <= n_samples - 1
-    if 1 < n_clusters < embeddings.shape[0]:
-        try:
-            silhouette_avg = silhouette_score(embeddings, cluster_labels)
-        except ValueError as e:
-            # This can happen if, e.g., KMeans results in a single cluster
-            # despite n_clusters > 1 (e.g. due to degenerate data or low n_samples)
-            print(f"Could not compute silhouette score (n_clusters={n_clusters}, n_samples={embeddings.shape[0]}): {e}")
-            silhouette_avg = None 
-            # Note: If cluster_labels contains only one unique value, silhouette_score raises ValueError.
-            # We check this explicitly:
-            if len(np.unique(cluster_labels)) < 2 :
-                 print(f"Silhouette score cannot be calculated with less than 2 unique clusters. Found {len(np.unique(cluster_labels))} unique cluster(s).")
-
-    elif n_clusters <= 1 or n_clusters >= embeddings.shape[0]:
-        print(f"Silhouette score not computed: n_clusters ({n_clusters}) must be > 1 and < n_samples ({embeddings.shape[0]}).")
-
-    return cluster_labels, silhouette_avg
-
-
-# GNN Autoencoder for Anomaly Detection
-
-class GNNAutoencoder(torch.nn.Module):
-    def __init__(self, encoder: torch.nn.Module, decoder_hidden_dims: list, 
-                 reconstructed_feature_dim: int, dropout_rate: float = 0.5):
-        super().__init__()
-        self.encoder = encoder
-
-        # Determine encoder's output embedding dimension
-        encoder_embedding_dim = None
-        if hasattr(encoder, 'out_channels'): # If encoder itself stores it (e.g. a custom attribute)
-            encoder_embedding_dim = encoder.out_channels
-        elif hasattr(encoder.convs[-1], 'out_channels'): # Last GCN/SAGE layer
-            encoder_embedding_dim = encoder.convs[-1].out_channels
-        elif isinstance(encoder, GATEncoder): # GATEncoder's last layer is specific
-             encoder_embedding_dim = encoder.convs[-1].out_channels
-        
-        if encoder_embedding_dim is None:
-            raise ValueError("Could not determine embedding dimension from the provided encoder.")
-
-        self.decoder_layers = torch.nn.ModuleList()
-        self.decoder_dropout_layers = torch.nn.ModuleList()
-        
-        current_dim = encoder_embedding_dim
-        all_decoder_output_dims = list(decoder_hidden_dims) + [reconstructed_feature_dim]
-
-        for i, target_dim in enumerate(all_decoder_output_dims):
-            is_last_layer = (i == len(all_decoder_output_dims) - 1)
-            
-            if isinstance(self.encoder, (GCNEncoder, SAGEEncoder)): # Assuming GCN and SAGE decoders are similar
-                conv_class = GCNConv if isinstance(self.encoder, GCNEncoder) else SAGEConv
-                conv = conv_class(current_dim, target_dim)
-            elif isinstance(self.encoder, GATEncoder):
-                # For GAT decoder layers, use heads=1 and concat=False for simplicity.
-                # The GATConv's internal dropout can be used.
-                conv = GATConv(current_dim, target_dim, heads=1, concat=False, dropout=dropout_rate if not is_last_layer else 0.0)
-            else:
-                raise ValueError(f"Unsupported encoder type for autoencoder decoder: {type(self.encoder).__name__}")
-            
-            self.decoder_layers.append(conv)
-            
-            if not is_last_layer:
-                self.decoder_dropout_layers.append(torch.nn.Dropout(dropout_rate))
-            
-            current_dim = target_dim
-
-    def forward(self, data: Data) -> torch.Tensor:
-        x, edge_index = data.x, data.edge_index
-        edge_attr = data.edge_attr if hasattr(data, 'edge_attr') else None
-
-        # Encode
-        if isinstance(self.encoder, GCNEncoder):
-            z = self.encoder(x, edge_index, edge_weight=edge_attr)
-        elif isinstance(self.encoder, GATEncoder):
-            z = self.encoder(x, edge_index, edge_attr=edge_attr)
-        elif isinstance(self.encoder, SAGEEncoder):
-            z = self.encoder(x, edge_index)
-        else:
-            raise NotImplementedError(f"Encoding for {type(self.encoder).__name__} not implemented in GNNAutoencoder.")
-
-        # Decode
-        for i, layer in enumerate(self.decoder_layers):
-            is_last_layer = (i == len(self.decoder_layers) - 1)
-            
-            if isinstance(self.encoder, GCNEncoder):
-                z = layer(z, edge_index, edge_weight=edge_attr) # GCNConv might use edge_weight
-            elif isinstance(self.encoder, SAGEEncoder):
-                z = layer(z, edge_index) # SAGEConv typically doesn't use edge_attr in basic form
-            elif isinstance(self.encoder, GATEncoder):
-                z = layer(z, edge_index, edge_attr=edge_attr) # GATConv uses edge_attr
-            
-            if not is_last_layer:
-                if isinstance(self.encoder, GATEncoder):
-                    z = F.elu(z)
-                else: # GCN, SAGE
-                    z = F.relu(z)
-                z = self.decoder_dropout_layers[i](z)
-            # No activation or dropout on the final output layer for reconstruction
-            
-        return z
-
-
-def train_gnn_autoencoder(model: GNNAutoencoder, data: Data, 
-                          optimizer: torch.optim.Optimizer, 
-                          criterion: torch.nn.Module, # e.g., torch.nn.MSELoss()
-                          n_epochs: int = 100):
-    """
-    Trains a GNNAutoencoder model.
-    """
-    train_mask = getattr(data, 'train_mask', None)
-    if train_mask is None:
-        print("Warning: 'train_mask' not found in data. Training on all nodes for autoencoder.")
-        train_mask = torch.ones(data.num_nodes, dtype=torch.bool, device=data.x.device) # Ensure mask is on same device
-    
-    if not train_mask.any():
-        print("Warning: train_mask is empty or all False. No nodes to train on.")
-        return model
-
-    for epoch in range(n_epochs):
-        model.train()
-        optimizer.zero_grad()
-        
-        x_reconstructed = model(data)
-        
-        loss = criterion(x_reconstructed[train_mask], data.x[train_mask])
-        
-        loss.backward()
-        optimizer.step()
-        
-        if epoch % 10 == 0 or epoch == n_epochs - 1:
-            print(f"Epoch {epoch+1}/{n_epochs}, Training Loss: {loss.item():.4f}")
-            
-    return model
-
-
-def get_reconstruction_errors(model: GNNAutoencoder, data: Data) -> np.ndarray:
-    """
-    Calculates per-node reconstruction errors using a trained GNNAutoencoder.
-    """
-    model.eval()
-    with torch.no_grad():
-        x_reconstructed = model(data)
-    
-    if data.x.shape != x_reconstructed.shape:
-        raise ValueError(f"Original features shape {data.x.shape} and reconstructed features shape {x_reconstructed.shape} mismatch.")
-
-    # Mean Squared Error per node
-    errors = torch.mean((data.x - x_reconstructed)**2, dim=1)
-    
-    return errors.detach().cpu().numpy()
-
-
-def get_anomalies_by_error(reconstruction_errors: np.ndarray, 
-                           node_ids: list,  # e.g., data.establishment_ids or list(data.node_id_map.keys())
-                           top_n: int = 10) -> list[tuple[any, float]]:
-    """
-    Identifies the top_n nodes with the highest reconstruction errors.
-
-    Args:
-        reconstruction_errors (np.ndarray): Per-node reconstruction errors.
-        node_ids (list): List of original node identifiers, in the same order as errors.
-        top_n (int): Number of top anomalies to return.
-
-    Returns:
-        list[tuple[any, float]]: List of (node_id, error_score) for the top_n anomalies.
-    """
-    if len(reconstruction_errors) != len(node_ids):
-        raise ValueError("Length of reconstruction_errors and node_ids must match.")
-
-    # Combine errors with node_ids
-    node_errors = list(zip(node_ids, reconstruction_errors))
-    
-    # Sort by error in descending order
-    node_errors.sort(key=lambda x: x[1], reverse=True)
-    
     return node_errors[:top_n]

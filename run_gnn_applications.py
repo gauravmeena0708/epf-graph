@@ -88,7 +88,13 @@ def main():
     
     # Convert NetworkX graph and feature DataFrames into a PyTorch Geometric Data object
     # Another copy of nodes_df is used for extracting original labels without interference from preprocessing.
-    pyg_data, node_id_map = create_pyg_data_object(nx_graph, node_features_df, nodes_df.copy(), feature_names) 
+    # Argument order for create_pyg_data_object: processed_node_features_df, nx_graph, original_nodes_df, feature_names_list
+    pyg_data, node_id_map = create_pyg_data_object(
+        nx_graph,                # Pass nx_graph first
+        node_features_df,        # Pass node_features_df second
+        nodes_df.copy(),         # Corresponds to original_nodes_df
+        feature_names            # Corresponds to feature_cols
+    )
     
     print(f"PyG Data object created: {pyg_data}")
     print(f"Node features shape (x): {pyg_data.x.shape}")
@@ -162,9 +168,10 @@ def main():
             available_y_attrs = [attr for attr in dir(pyg_data) if attr.startswith('y_')]
             raise ValueError(f"Target label attribute '{target_label_attribute_name}' not found in PyG data object. Available y attributes: {available_y_attrs}")
         
-        # Determine number of classes from the label mapping stored in pyg_data
-        # (e.g., pyg_data.y_industry_mapping)
-        num_classes = len(getattr(pyg_data, f'{target_label_attribute_name}_mapping'))
+        # Determine number of classes using the label_encoders stored in pyg_data
+        if not hasattr(pyg_data, 'label_encoders') or args.target_label not in pyg_data.label_encoders:
+            raise ValueError(f"Label encoder for target '{args.target_label}' not found in pyg_data.label_encoders.")
+        num_classes = len(pyg_data.label_encoders[args.target_label].classes_)
         
         # Initialize the NodeClassifier model, optimizer, and loss function
         classifier_model = NodeClassifier(encoder, num_classes=num_classes)

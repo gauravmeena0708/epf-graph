@@ -1,0 +1,84 @@
+<?xml version='1.0' encoding='utf-8'?>
+<gexf xmlns="http://www.gexf.net/1.2draft" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.gexf.net/1.2draft http://www.gexf.net/1.2draft/gexf.xsd" version="1.2">
+  <meta lastmodifieddate="2025-05-25">
+    <creator>NetworkX 3.4.2</creator>
+  </meta>
+  <graph defaultedgetype="directed" mode="static" name="">
+    <attributes mode="static" class="node">
+      <attribute id="0" title="name" type="string" />
+      <attribute id="1" title="industry" type="string" />
+      <attribute id="2" title="size_category" type="string" />
+      <attribute id="3" title="city" type="string" />
+    </attributes>
+    <nodes>
+      <node id="EST001" label="EST001">
+        <attvalues>
+          <attvalue for="0" value="Alpha Tech Solutions" />
+          <attvalue for="1" value="Information Technology" />
+          <attvalue for="2" value="Large" />
+          <attvalue for="3" value="Bangalore" />
+        </attvalues>
+      </node>
+      <node id="EST002" label="EST002">
+        <attvalues>
+          <attvalue for="0" value="Beta Manufacturing Co." />
+          <attvalue for="1" value="Manufacturing" />
+          <attvalue for="2" value="Medium" />
+          <attvalue for="3" value="Pune" />
+        </attvalues>
+      </node>
+      <node id="EST003" label="EST003">
+        <attvalues>
+          <attvalue for="0" value="Gamma Logistics" />
+          <attvalue for="1" value="Logistics" />
+          <attvalue for="2" value="Small" />
+          <attvalue for="3" value="Chennai" />
+        </attvalues>
+      </node>
+      <node id="EST004" label="EST004">
+        <attvalues>
+          <attvalue for="0" value="Delta Innovations" />
+          <attvalue for="1" value="Information Technology" />
+          <attvalue for="2" value="Medium" />
+          <attvalue for="3" value="Hyderabad" />
+        </attvalues>
+      </node>
+      <node id="EST005" label="EST005">
+        <attvalues>
+          <attvalue for="0" value="Epsilon Consulting" />
+          <attvalue for="1" value="Consulting" />
+          <attvalue for="2" value="Large" />
+          <attvalue for="3" value="Mumbai" />
+        </attvalues>
+      </node>
+      <node id="EST006" label="EST006">
+        <attvalues>
+          <attvalue for="0" value="Zeta Pharma" />
+          <attvalue for="1" value="Pharmaceuticals" />
+          <attvalue for="2" value="Large" />
+          <attvalue for="3" value="Ahmedabad" />
+        </attvalues>
+      </node>
+      <node id="EST007" label="EST007">
+        <attvalues>
+          <attvalue for="0" value="Omega IT Services" />
+          <attvalue for="1" value="Information Technology" />
+          <attvalue for="2" value="Small" />
+          <attvalue for="3" value="Bangalore" />
+        </attvalues>
+      </node>
+    </nodes>
+    <edges>
+      <edge source="EST001" target="EST004" id="0" weight="35" />
+      <edge source="EST001" target="EST007" id="1" weight="15" />
+      <edge source="EST001" target="EST005" id="2" weight="12" />
+      <edge source="EST002" target="EST003" id="3" weight="20" />
+      <edge source="EST002" target="EST006" id="4" weight="18" />
+      <edge source="EST003" target="EST002" id="5" weight="5" />
+      <edge source="EST004" target="EST001" id="6" weight="10" />
+      <edge source="EST005" target="EST001" id="7" weight="25" />
+      <edge source="EST006" target="EST004" id="8" weight="30" />
+      <edge source="EST007" target="EST004" id="9" weight="8" />
+    </edges>
+  </graph>
+</gexf>
