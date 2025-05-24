@@ -129,3 +129,70 @@ The project is designed to be extensible. New graph analysis functions can be ad
 3.  Calling the function within the appropriate analysis block (e.g., establishment, transfer, network) in `run_analysis.py`.
 
 This allows for easy expansion of the analytical capabilities.
+
+## 8. Advanced GNN Applications (via `run_gnn_applications.py`)
+Beyond temporal link prediction, the project now includes a suite of advanced GNN applications leveraging models like Graph Convolutional Networks (GCN), GraphSAGE, and Graph Attention Networks (GAT). These applications are accessible through the `run_gnn_applications.py` script.
+
+The core functionalities include:
+*   **Node Classification**: Predict attributes of nodes (e.g., industry, city, size category) based on their features and graph structure.
+*   **Node Clustering**: Group similar nodes together based on their learned GNN embeddings using algorithms like K-Means. This can help identify communities or segments of establishments with shared characteristics.
+*   **Anomaly Detection**: Identify unusual or anomalous nodes (establishments) using GNN-based autoencoders. Nodes with high reconstruction error are flagged as potential anomalies.
+
+### Running Advanced GNN Applications
+The `run_gnn_applications.py` script is the entry point for these tasks.
+
+*   **Key Command-Line Arguments**:
+    *   `--gnn_model <model_type>`: Specify the GNN architecture. Choices: `gcn`, `sage`, `gat`.
+    *   `--application <app_type>`: Specify the application to run. Choices: `classification`, `clustering`, `anomaly_detection`.
+    *   `--nodes_file <path>`: Path to the nodes CSV file (default: `epfo_establishments_nodes.csv`).
+    *   `--edges_file <path>`: Path to the edges CSV file (default: `epfo_transfers_edges.csv`).
+    *   `--epochs <number>`: Number of training epochs.
+    *   `--lr <value>`: Learning rate.
+    *   `--hidden_channels <number>`: Number of hidden units in GNN layers.
+    *   `--embedding_size <number>`: Dimension of node embeddings output by the encoder part of the models.
+    *   `--num_gnn_layers <number>`: Number of layers in the GNN encoder.
+    *   `--dropout_rate <value>`: Dropout rate for GNN layers.
+    *   `--gat_heads <number>`: Number of attention heads (if using GAT).
+    *   **For Classification**:
+        *   `--target_label <label>`: The node attribute to predict (e.g., `industry`, `city`, `size_category`).
+    *   **For Clustering**:
+        *   `--n_clusters <number>`: The number of clusters for K-Means.
+    *   **For Anomaly Detection**:
+        *   `--decoder_hidden_dims <list_of_numbers>`: List of hidden dimensions for the autoencoder's decoder.
+        *   `--anomaly_top_n <number>`: Number of top anomalies to report.
+
+*   **Examples**:
+
+    1.  **Node Classification (Industry Prediction using GCN)**:
+        ```bash
+        python run_gnn_applications.py --gnn_model gcn --application classification --target_label industry --epochs 50 --lr 0.01
+        ```
+
+    2.  **Node Clustering (using GraphSAGE encoder and K-Means)**:
+        This first trains a GNN autoencoder with a GraphSAGE encoder to learn embeddings, then clusters these embeddings.
+        ```bash
+        python run_gnn_applications.py --gnn_model sage --application clustering --n_clusters 5 --epochs 50 --embedding_size 32
+        ```
+        (Note: The GNN encoder specified by `--gnn_model` is used as the encoder part of an autoencoder to generate embeddings for clustering.)
+
+    3.  **Anomaly Detection (using GAT-based Autoencoder)**:
+        ```bash
+        python run_gnn_applications.py --gnn_model gat --application anomaly_detection --epochs 100 --embedding_size 32 --decoder_hidden_dims 64 32 --anomaly_top_n 15
+        ```
+
+## 9. Outputs
+*   **`run_analysis.py`**: Prints all results (DataFrames, lists, metrics) directly to the console, formatted for readability.
+*   **`data.py`**: If run directly (`python data.py`) or if its saving functions are explicitly called, it will generate:
+    *   `epfo_establishments_nodes.csv`: CSV file of establishment data.
+    *   `epfo_transfers_edges.csv`: CSV file of transfer data.
+    *   `epfo_transfers_graph.gexf`: A GEXF file for graph visualization.
+*   **`main.py`**: Prints training and evaluation metrics for the temporal link prediction model to the console.
+*   **`run_gnn_applications.py`**: Prints training progress, evaluation results (e.g., accuracy for classification, silhouette score for clustering), and lists of anomalous nodes to the console.
+
+## 10. (Optional) Extending the Analysis
+The project is designed to be extensible. New graph analysis functions can be added to `graph_analysis.py`. These functions can then be integrated into `run_analysis.py` by:
+1.  Importing the new function in `run_analysis.py`.
+2.  Adding relevant command-line arguments if customization is needed.
+3.  Calling the function within the appropriate analysis block (e.g., establishment, transfer, network) in `run_analysis.py`.
+
+This allows for easy expansion of the static graph analytical capabilities. Similarly, new GNN models or applications can be developed in `gnn_applications.py` and integrated into `run_gnn_applications.py`.
