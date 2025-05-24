@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Employee Transfer Visualization</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.min.js"
+      }
+    }
+    </script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; margin: 0; overflow: hidden; background-color: #1f2937; /* bg-gray-800 */ }
+        #visualizationContainer { width: 100vw; height: 100vh; position: relative; }
+        #controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background-color: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); display: flex; align-items: center; gap: 20px; }
+        #timeSlider { width: 300px; }
+        #infoPanel { position: absolute; top: 20px; right: 20px; width: 300px; max-height: 90vh; overflow-y: auto; background-color: rgba(255, 255, 255, 0.95); padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); color: #1f2937; display: none; }
+        #infoPanel h3 { font-size: 1.25rem; font-weight: bold; margin-bottom: 10px; color: #111827; } /* text-xl text-gray-900 */
+        #infoPanel p { margin-bottom: 8px; font-size: 0.875rem; } /* text-sm */
+        #infoPanel strong { font-weight: 600; } /* semibold */
+        .close-button { position: absolute; top: 10px; right: 10px; background: #ef4444; color: white; border: none; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-weight: bold; }
+        #loadingIndicator { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-size: 1.5rem; padding: 20px; background-color: rgba(0,0,0,0.7); border-radius: 8px; }
+        #tooltip { position: absolute; background-color: rgba(0, 0, 0, 0.75); color: white; padding: 5px 10px; border-radius: 4px; pointer-events: none; opacity: 0; transition: opacity 0.2s; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <div id="visualizationContainer">
+        <canvas id="mainCanvas"></canvas>
+    </div>
+
+    <div id="controls" class="text-gray-800">
+        <label for="timeSlider" class="font-semibold">Time (Month):</label>
+        <input type="range" id="timeSlider" min="0" value="0">
+        <span id="currentTimeDisplay" class="font-semibold w-16 text-center">Month: 0</span>
+    </div>
+
+    <div id="infoPanel">
+        <button id="closeInfoPanel" class="close-button">&times;</button>
+        <h3 id="infoName">Details</h3>
+        <div id="infoDetails"></div>
+    </div>
+
+    <div id="loadingIndicator">Loading Visualization...</div>
+    <div id="tooltip"></div>
+
+    <script type="module">
+        // Import THREE and OrbitControls using ES module syntax
+        import * as THREE from 'three'; // Now imports the THREE namespace
+        import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/controls/OrbitControls.js'; // This will use the import map for its internal 'three' imports
+
+        let scene, camera, renderer, controls;
+        let establishments = {}, employees = {}; // Store 3D objects and data
+        let employeeMeshes = {}, establishmentMeshes = {};
+        let lines = []; // For transfer paths if needed
+
+        const MAX_TIMESTAMP = 12; // Simulate 12 months
+        let currentTime = 0;
+        const EMPLOYEE_SPREAD_RADIUS = 30; // How far employees spread around an establishment
+        const EMPLOYEE_ANIMATION_DURATION = 1000; // 1 second for transfer animation
+
+        const tooltip = document.getElementById('tooltip');
+        const raycaster = new THREE.Raycaster(); // THREE.Raycaster will be used
+        const mouse = new THREE.Vector2(); // THREE.Vector2 will be used
+
+        // --- Sample Data ---
+        const establishmentsData = [
+            { id: 'EST001', name: 'Alpha Tech', industry: 'IT', city: 'Bangalore', owners: ['Alice', 'Bob'], color: 0x4A90E2, initialPosition: { x: -250, y: 50, z: 0 } },
+            { id: 'EST002', name: 'Beta Mfg', industry: 'Manufacturing', city: 'Pune', owners: ['Charlie'], color: 0x50E3C2, initialPosition: { x: 250, y: -50, z: 50 } },
+            { id: 'EST003', name: 'Gamma Retail', industry: 'Retail', city: 'Mumbai', owners: ['David', 'Eve'], color: 0xF5A623, initialPosition: { x: 0, y: 100, z: -200 } },
+            { id: 'EST004', name: 'Delta Consult', industry: 'Consulting', city: 'Hyderabad', owners: ['Frank'], color: 0xBD10E0, initialPosition: { x: 150, y: -150, z: 150 } },
+        ];
+
+        const employeesData = {
+            'EMP001': { name: 'John Doe', age: 30, balance: 50000, wages: 60000, jobTitle: 'Engineer', initialEstablishmentId: 'EST001', color: 0xffffff },
+            'EMP002': { name: 'Jane Smith', age: 28, balance: 70000, wages: 80000, jobTitle: 'Manager', initialEstablishmentId: 'EST001', color: 0xffffff },
+            'EMP003': { name: 'Peter Jones', age: 35, balance: 45000, wages: 55000, jobTitle: 'Analyst', initialEstablishmentId: 'EST002', color: 0xffffff },
+            'EMP004': { name: 'Mary Brown', age: 32, balance: 90000, wages: 95000, jobTitle: 'Developer', initialEstablishmentId: 'EST003', color: 0xffffff },
+            'EMP005': { name: 'Chris Green', age: 25, balance: 30000, wages: 40000, jobTitle: 'Intern', initialEstablishmentId: 'EST001', color: 0xffffff },
+            'EMP006': { name: 'Lisa Ray', age: 38, balance: 120000, wages: 110000, jobTitle: 'Sr. Engineer', initialEstablishmentId: 'EST002', color: 0xffffff },
+            'EMP007': { name: 'Tom Hanks', age: 22, balance: 25000, wages: 35000, jobTitle: 'Associate', initialEstablishmentId: 'EST004', color: 0xffffff },
+        };
+
+        const transfersData = [
+            { employeeId: 'EMP001', fromId: 'EST001', toId: 'EST002', timestamp: 3, balanceChange: 5000 },
+            { employeeId: 'EMP003', fromId: 'EST002', toId: 'EST003', timestamp: 5, balanceChange: -2000 },
+            { employeeId: 'EMP005', fromId: 'EST001', toId: 'EST004', timestamp: 2, balanceChange: 1000 },
+            { employeeId: 'EMP001', fromId: 'EST002', toId: 'EST003', timestamp: 8, balanceChange: 7000 },
+            { employeeId: 'EMP002', fromId: 'EST001', toId: 'EST002', timestamp: 6, balanceChange: 10000 },
+            { employeeId: 'EMP006', fromId: 'EST002', toId: 'EST001', timestamp: 4, balanceChange: 15000 },
+            { employeeId: 'EMP007', fromId: 'EST004', toId: 'EST001', timestamp: 7, balanceChange: 5000 },
+            { employeeId: 'EMP004', fromId: 'EST003', toId: 'EST004', timestamp: 10, balanceChange: 3000 },
+        ];
+
+        // --- Initialization ---
+        function init() {
+            const container = document.getElementById('visualizationContainer');
+            const canvas = document.getElementById('mainCanvas');
+
+            // Scene
+            scene = new THREE.Scene(); // Uses imported THREE
+            scene.background = new THREE.Color(0x1f2937); // Uses imported THREE
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 2000); // Uses imported THREE
+            camera.position.set(0, 150, 500);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true }); // Uses imported THREE
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+
+            // Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7); // Uses imported THREE
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8); // Uses imported THREE
+            directionalLight.position.set(50, 200, 100);
+            scene.add(directionalLight);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement); // Uses imported OrbitControls
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            controls.minDistance = 100;
+            controls.maxDistance = 1500;
+            controls.maxPolarAngle = Math.PI / 2;
+
+
+            // Create 3D Objects
+            createEstablishmentObjects();
+            createEmployeeObjects();
+
+            // Initial positioning of employees
+            updateVisuals(currentTime, true); // true for initial placement
+
+            // Event Listeners
+            window.addEventListener('resize', onWindowResize);
+            document.getElementById('timeSlider').addEventListener('input', onTimeSliderChange);
+            document.getElementById('closeInfoPanel').addEventListener('click', () => {
+                document.getElementById('infoPanel').style.display = 'none';
+            });
+            renderer.domElement.addEventListener('click', onCanvasClick);
+            renderer.domElement.addEventListener('mousemove', onCanvasMouseMove);
+
+
+            // Hide loading indicator
+            document.getElementById('loadingIndicator').style.display = 'none';
+
+            // Start animation loop
+            animate();
+        }
+
+        function createEstablishmentObjects() {
+            const geometry = new THREE.SphereGeometry(25, 32, 32); // Uses imported THREE
+            establishmentsData.forEach(data => {
+                const material = new THREE.MeshPhongMaterial({ color: data.color }); // Uses imported THREE
+                const mesh = new THREE.Mesh(geometry, material); // Uses imported THREE
+                mesh.position.set(data.initialPosition.x, data.initialPosition.y, data.initialPosition.z);
+                mesh.userData = { type: 'establishment', id: data.id, ...data };
+                scene.add(mesh);
+                establishmentMeshes[data.id] = mesh;
+                establishments[data.id] = { ...data, mesh: mesh, currentEmployees: new Set() };
+            });
+        }
+
+        function createEmployeeObjects() {
+            const geometry = new THREE.SphereGeometry(5, 16, 16); // Uses imported THREE
+            Object.entries(employeesData).forEach(([id, data]) => {
+                const material = new THREE.MeshPhongMaterial({ color: data.color || 0xffffff }); // Uses imported THREE
+                const mesh = new THREE.Mesh(geometry, material); // Uses imported THREE
+                mesh.userData = { type: 'employee', id: id, ...data };
+                scene.add(mesh);
+                employeeMeshes[id] = mesh;
+
+                // Initialize employee state
+                employees[id] = {
+                    ...data,
+                    mesh: mesh,
+                    currentEstablishmentId: data.initialEstablishmentId,
+                    currentBalance: data.balance,
+                    isAnimating: false,
+                    animationData: null
+                };
+                // Add employee to their initial establishment's set
+                if (establishments[data.initialEstablishmentId]) {
+                    establishments[data.initialEstablishmentId].currentEmployees.add(id);
+                }
+            });
+        }
+
+        function getEmployeeStateAtTime(employeeId, time) {
+            const employee = employeesData[employeeId];
+            let currentEstId = employee.initialEstablishmentId;
+            let currentBalance = employee.balance;
+
+            const relevantTransfers = transfersData
+                .filter(t => t.employeeId === employeeId && t.timestamp <= time)
+                .sort((a, b) => a.timestamp - b.timestamp);
+
+            relevantTransfers.forEach(transfer => {
+                currentEstId = transfer.toId;
+                currentBalance += transfer.balanceChange;
+            });
+            return { establishmentId: currentEstId, balance: currentBalance };
+        }
+
+
+        function updateVisuals(time, isInitialPlacement = false) {
+            Object.entries(employees).forEach(([empId, empData]) => {
+                const stateAtTime = getEmployeeStateAtTime(empId, time);
+                const targetEstablishmentId = stateAtTime.establishmentId;
+                empData.currentBalance = stateAtTime.balance; // Update balance for info panel
+
+                const oldEstablishmentId = empData.currentEstablishmentId;
+
+                if (oldEstablishmentId !== targetEstablishmentId && !isInitialPlacement) {
+                    // A transfer needs to happen or is in progress
+                    const fromEstMesh = establishmentMeshes[oldEstablishmentId];
+                    const toEstMesh = establishmentMeshes[targetEstablishmentId];
+
+                    if (fromEstMesh && toEstMesh) {
+                        empData.isAnimating = true;
+                        empData.animationData = {
+                            startPos: empData.mesh.position.clone(), // Current position
+                            endPos: getEmployeePositionAroundEstablishment(toEstMesh, empId),
+                            startTime: Date.now()
+                        };
+                        
+                        // Update logical belonging immediately for sets
+                        if(establishments[oldEstablishmentId]) establishments[oldEstablishmentId].currentEmployees.delete(empId);
+                        if(establishments[targetEstablishmentId]) establishments[targetEstablishmentId].currentEmployees.add(empId);
+                        empData.currentEstablishmentId = targetEstablishmentId;
+                    }
+                } else if (empData.currentEstablishmentId !== targetEstablishmentId && isInitialPlacement) {
+                     // Initial placement or snap if no animation
+                    empData.currentEstablishmentId = targetEstablishmentId;
+                    if(establishments[oldEstablishmentId] && oldEstablishmentId !== targetEstablishmentId) establishments[oldEstablishmentId].currentEmployees.delete(empId);
+                    if(establishments[targetEstablishmentId]) establishments[targetEstablishmentId].currentEmployees.add(empId);
+                    
+                    const targetEstMesh = establishmentMeshes[targetEstablishmentId];
+                    if (targetEstMesh) {
+                        empData.mesh.position.copy(getEmployeePositionAroundEstablishment(targetEstMesh, empId));
+                    }
+                } else if (!empData.isAnimating) {
+                    // If not transferring and not initial, ensure it's at its current establishment
+                    const currentEstMesh = establishmentMeshes[empData.currentEstablishmentId];
+                    if (currentEstMesh) {
+                         empData.mesh.position.copy(getEmployeePositionAroundEstablishment(currentEstMesh, empId));
+                    }
+                }
+            });
+        }
+        
+        function getEmployeePositionAroundEstablishment(establishmentMesh, employeeId) {
+            // Simple circular arrangement for employees around an establishment
+            const basePos = establishmentMesh.position.clone();
+            const employeeIndex = Array.from(establishments[establishmentMesh.userData.id].currentEmployees).indexOf(employeeId);
+            const totalEmployeesAtEst = establishments[establishmentMesh.userData.id].currentEmployees.size;
+            
+            if (totalEmployeesAtEst <= 0) return basePos.add(new THREE.Vector3(0, EMPLOYEE_SPREAD_RADIUS + 5, 0)); // Uses imported THREE
+
+            const angle = (employeeIndex / Math.max(1, totalEmployeesAtEst)) * Math.PI * 2;
+            const offsetX = Math.cos(angle) * EMPLOYEE_SPREAD_RADIUS;
+            const offsetZ = Math.sin(angle) * EMPLOYEE_SPREAD_RADIUS;
+            // Try to place them on the "surface" or slightly above the establishment sphere
+            const establishmentRadius = establishmentMesh.geometry.parameters.radius || 25;
+            return basePos.add(new THREE.Vector3(offsetX, establishmentRadius * 0.5, offsetZ)); // Uses imported THREE
+        }
+
+
+        // --- Event Handlers ---
+        function onWindowResize() {
+            const container = document.getElementById('visualizationContainer');
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        }
+
+        function onTimeSliderChange(event) {
+            currentTime = parseInt(event.target.value);
+            document.getElementById('currentTimeDisplay').textContent = `Month: ${currentTime}`;
+            updateVisuals(currentTime);
+        }
+
+        function onCanvasClick(event) {
+            mouse.x = (event.clientX / renderer.domElement.clientWidth) * 2 - 1;
+            mouse.y = -(event.clientY / renderer.domElement.clientHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+
+            const intersects = raycaster.intersectObjects(scene.children, true); // true for recursive
+
+            if (intersects.length > 0) {
+                const intersectedObject = intersects[0].object;
+                if (intersectedObject.userData && (intersectedObject.userData.type === 'establishment' || intersectedObject.userData.type === 'employee')) {
+                    displayInfo(intersectedObject.userData);
+                }
+            } else {
+                document.getElementById('infoPanel').style.display = 'none';
+            }
+        }
+        
+        function onCanvasMouseMove(event) {
+            mouse.x = (event.clientX / renderer.domElement.clientWidth) * 2 - 1;
+            mouse.y = -(event.clientY / renderer.domElement.clientHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+
+            const intersects = raycaster.intersectObjects(scene.children, true);
+
+            if (intersects.length > 0) {
+                const intersectedObject = intersects[0].object;
+                if (intersectedObject.userData && (intersectedObject.userData.type === 'establishment' || intersectedObject.userData.type === 'employee')) {
+                    tooltip.style.opacity = '1';
+                    tooltip.style.left = `${event.clientX + 10}px`;
+                    tooltip.style.top = `${event.clientY + 10}px`;
+                    tooltip.textContent = `${intersectedObject.userData.type === 'establishment' ? 'Est:' : 'Emp:'} ${intersectedObject.userData.name} (${intersectedObject.userData.id})`;
+                } else {
+                    tooltip.style.opacity = '0';
+                }
+            } else {
+                tooltip.style.opacity = '0';
+            }
+        }
+
+
+        function displayInfo(data) {
+            const infoPanel = document.getElementById('infoPanel');
+            const infoName = document.getElementById('infoName');
+            const infoDetails = document.getElementById('infoDetails');
+
+            infoName.textContent = data.name || data.id;
+            let detailsHtml = `<p><strong>ID:</strong> ${data.id}</p>`;
+
+            if (data.type === 'establishment') {
+                detailsHtml += `<p><strong>Industry:</strong> ${data.industry}</p>`;
+                detailsHtml += `<p><strong>City:</strong> ${data.city}</p>`;
+                detailsHtml += `<p><strong>Owners:</strong> ${data.owners.join(', ')}</p>`;
+                const currentEmpList = Array.from(establishments[data.id].currentEmployees).map(empId => employees[empId]? employees[empId].name : empId).join(', ') || 'None';
+                detailsHtml += `<p><strong>Current Employees (${establishments[data.id].currentEmployees.size}):</strong> ${currentEmpList}</p>`;
+            } else if (data.type === 'employee') {
+                const empFullData = employees[data.id]; // Get potentially updated data
+                detailsHtml += `<p><strong>Age:</strong> ${empFullData.age}</p>`;
+                detailsHtml += `<p><strong>Job Title:</strong> ${empFullData.jobTitle}</p>`;
+                detailsHtml += `<p><strong>Balance:</strong> ${empFullData.currentBalance.toLocaleString()}</p>`;
+                detailsHtml += `<p><strong>Wages:</strong> ${empFullData.wages.toLocaleString()}</p>`;
+                const currentEst = establishmentMeshes[empFullData.currentEstablishmentId];
+                detailsHtml += `<p><strong>Current Establishment:</strong> ${currentEst ? currentEst.userData.name : empFullData.currentEstablishmentId}</p>`;
+            }
+            infoDetails.innerHTML = detailsHtml;
+            infoPanel.style.display = 'block';
+        }
+
+
+        // --- Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update(); // For damping
+            TWEEN.update(); // Update all tweens
+
+            // Handle employee transfer animations
+            Object.values(employees).forEach(empData => {
+                if (empData.isAnimating && empData.animationData) {
+                    const ad = empData.animationData;
+                    const elapsedTime = Date.now() - ad.startTime;
+                    let progress = elapsedTime / EMPLOYEE_ANIMATION_DURATION;
+
+                    if (progress >= 1) {
+                        progress = 1;
+                        empData.isAnimating = false;
+                        empData.animationData = null;
+                        empData.mesh.position.copy(ad.endPos);
+                    } else {
+                        empData.mesh.position.lerpVectors(ad.startPos, ad.endPos, progress);
+                    }
+                }
+            });
+
+            renderer.render(scene, camera);
+        }
+
+        // --- Start ---
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('timeSlider').max = MAX_TIMESTAMP;
+            init();
+        });
+
+    </script>
+</body>
+</html>
