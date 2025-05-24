@@ -1,0 +1,10 @@
+pandas
+networkx
+matplotlib
+scipy
+scikit-learn
+python-louvain
+torch
+torch-geometric
+# Add any specific versions if known to be required by torch-geometric installation
+# e.g., torch-scatter, torch-sparse - these are often handled by pyg's own find links
