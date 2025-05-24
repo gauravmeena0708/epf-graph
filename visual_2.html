@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Employee Transfer Visualization</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.min.js"
+      }
+    }
+    </script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; margin: 0; overflow: hidden; background-color: #1f2937; /* bg-gray-800 */ }
+        #visualizationContainer { width: 100vw; height: 100vh; position: relative; }
+        #controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background-color: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); display: flex; flex-direction: column; align-items: center; gap: 10px; }
+        .control-row { display: flex; align-items: center; gap: 15px; }
+        #timeSlider { width: 300px; }
+        #fileUploadButton { padding: 8px 15px; background-color: #4A90E2; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; }
+        #fileUploadButton:hover { background-color: #357ABD; }
+        #infoPanel { position: absolute; top: 20px; right: 20px; width: 300px; max-height: 90vh; overflow-y: auto; background-color: rgba(255, 255, 255, 0.95); padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); color: #1f2937; display: none; z-index: 10; }
+        #infoPanel h3 { font-size: 1.25rem; font-weight: bold; margin-bottom: 10px; color: #111827; }
+        #infoPanel p { margin-bottom: 8px; font-size: 0.875rem; }
+        #infoPanel strong { font-weight: 600; }
+        .close-button { position: absolute; top: 10px; right: 10px; background: #ef4444; color: white; border: none; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-weight: bold; }
+        #loadingIndicator, #processingIndicator, #initialMessage { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-size: 1.5rem; padding: 20px; background-color: rgba(0,0,0,0.8); border-radius: 8px; z-index: 20; text-align: center; }
+        #tooltip { position: absolute; background-color: rgba(0, 0, 0, 0.75); color: white; padding: 5px 10px; border-radius: 4px; pointer-events: none; opacity: 0; transition: opacity 0.2s; font-size: 0.8rem; z-index: 30;}
+    </style>
+</head>
+<body>
+    <div id="visualizationContainer">
+        <canvas id="mainCanvas"></canvas>
+    </div>
+
+    <div id="controls" class="text-gray-800">
+        <div class="control-row">
+            <input type="file" id="excelFile" accept=".xlsx, .xls" style="display: none;">
+            <button id="fileUploadButton">Upload Excel Data</button>
+        </div>
+        <div class="control-row">
+            <label for="timeSlider" class="font-semibold">Time (Month):</label>
+            <input type="range" id="timeSlider" min="0" value="0" disabled>
+            <span id="currentTimeDisplay" class="font-semibold w-16 text-center">Month: 0</span>
+        </div>
+    </div>
+
+    <div id="infoPanel">
+        <button id="closeInfoPanel" class="close-button">&times;</button>
+        <h3 id="infoName">Details</h3>
+        <div id="infoDetails"></div>
+    </div>
+
+    <div id="initialMessage">Upload an Excel file to start the visualization.</div>
+    <div id="loadingIndicator" style="display: none;">Loading Visualization...</div>
+    <div id="processingIndicator" style="display: none;">Processing Excel File...</div>
+    <div id="tooltip"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls;
+        let establishments = {}, employees = {};
+        let employeeMeshes = {}, establishmentMeshes = {};
+        
+        let MAX_TIMESTAMP = 0;
+        let currentTime = 0;
+        const EMPLOYEE_SPREAD_RADIUS = 30;
+        const EMPLOYEE_ANIMATION_DURATION = 1000;
+
+        const tooltip = document.getElementById('tooltip');
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        // Global data stores, to be populated from Excel
+        let establishmentsData = [];
+        let employeesData = {}; // Object for easier lookup by ID
+        let transfersData = [];
+
+        const initialMessageDiv = document.getElementById('initialMessage');
+        const loadingIndicatorDiv = document.getElementById('loadingIndicator');
+        const processingIndicatorDiv = document.getElementById('processingIndicator');
+        const timeSlider = document.getElementById('timeSlider');
+        const currentTimeDisplay = document.getElementById('currentTimeDisplay');
+        const fileUploadButton = document.getElementById('fileUploadButton');
+        const excelFileInput = document.getElementById('excelFile');
+
+        fileUploadButton.addEventListener('click', () => excelFileInput.click());
+        excelFileInput.addEventListener('change', handleFileUpload);
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (file) {
+                initialMessageDiv.style.display = 'none';
+                processingIndicatorDiv.style.display = 'block';
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, {type: 'array'});
+                    try {
+                        parseWorkbookData(workbook);
+                        resetAndInitializeScene(); // Reset and init after data is parsed
+                        processingIndicatorDiv.style.display = 'none';
+                        timeSlider.disabled = false;
+                    } catch (error) {
+                        console.error("Error parsing workbook or initializing scene:", error);
+                        alert("Error processing Excel file. Check console for details. Ensure sheets 'Establishments', 'Employees', 'Transfers' exist and have correct columns.");
+                        processingIndicatorDiv.style.display = 'none';
+                        initialMessageDiv.style.display = 'block'; // Show initial message again
+                    }
+                };
+                reader.onerror = function(error) {
+                    console.error("FileReader error:", error);
+                    alert("Error reading file.");
+                    processingIndicatorDiv.style.display = 'none';
+                    initialMessageDiv.style.display = 'block';
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        }
+
+        function parseWorkbookData(workbook) {
+            const estSheet = workbook.Sheets['Establishments'];
+            const empSheet = workbook.Sheets['Employees'];
+            const transSheet = workbook.Sheets['Transfers'];
+
+            if (!estSheet || !empSheet || !transSheet) {
+                throw new Error("One or more required sheets (Establishments, Employees, Transfers) are missing.");
+            }
+
+            const rawEstData = XLSX.utils.sheet_to_json(estSheet);
+            const rawEmpData = XLSX.utils.sheet_to_json(empSheet);
+            transfersData = XLSX.utils.sheet_to_json(transSheet);
+
+            establishmentsData = rawEstData.map(d => ({
+                id: String(d.id),
+                name: String(d.name),
+                industry: String(d.industry),
+                city: String(d.city),
+                owners: String(d.owners).split(',').map(s => s.trim()),
+                color: parseInt(String(d.color).replace('#', ''), 16),
+                initialPosition: { x: parseFloat(d.initialPositionX), y: parseFloat(d.initialPositionY), z: parseFloat(d.initialPositionZ) }
+            }));
+
+            employeesData = {}; // Reset before populating
+            rawEmpData.forEach(d => {
+                employeesData[String(d.id)] = {
+                    name: String(d.name),
+                    age: parseInt(d.age),
+                    balance: parseFloat(d.balance),
+                    wages: parseFloat(d.wages),
+                    jobTitle: String(d.jobTitle),
+                    initialEstablishmentId: String(d.initialEstablishmentId),
+                    color: parseInt(String(d.color).replace('#', ''), 16)
+                };
+            });
+            
+            // Determine MAX_TIMESTAMP from transfers
+            if (transfersData.length > 0) {
+                MAX_TIMESTAMP = Math.max(...transfersData.map(t => parseInt(t.timestamp)), 0);
+            } else {
+                MAX_TIMESTAMP = 0;
+            }
+            timeSlider.max = MAX_TIMESTAMP;
+            timeSlider.value = 0;
+            currentTime = 0;
+            currentTimeDisplay.textContent = `Month: 0`;
+        }
+        
+        function clearScene() {
+            // Remove all meshes from the scene and dispose of their geometries and materials
+            Object.values(employeeMeshes).forEach(mesh => {
+                if (mesh.geometry) mesh.geometry.dispose();
+                if (mesh.material) mesh.material.dispose();
+                scene.remove(mesh);
+            });
+            Object.values(establishmentMeshes).forEach(mesh => {
+                if (mesh.geometry) mesh.geometry.dispose();
+                if (mesh.material) mesh.material.dispose();
+                scene.remove(mesh);
+            });
+        
+            // Clear data stores
+            employeeMeshes = {};
+            establishmentMeshes = {};
+            establishments = {};
+            employees = {};
+        }
+
+
+        function resetAndInitializeScene() {
+            loadingIndicatorDiv.style.display = 'block';
+            if (scene) { // If scene already exists, clear it
+                clearScene();
+            } else { // First time initialization
+                const container = document.getElementById('visualizationContainer');
+                const canvas = document.getElementById('mainCanvas');
+                scene = new THREE.Scene();
+                scene.background = new THREE.Color(0x1f2937);
+                camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 2000);
+                camera.position.set(0, 150, 500);
+                renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+                renderer.setSize(container.clientWidth, container.clientHeight);
+                renderer.setPixelRatio(window.devicePixelRatio);
+                
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+                scene.add(ambientLight);
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(50, 200, 100);
+                scene.add(directionalLight);
+
+                controls = new OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.05;
+                controls.minDistance = 100;
+                controls.maxDistance = 1500;
+                controls.maxPolarAngle = Math.PI / 2;
+
+                window.addEventListener('resize', onWindowResize);
+                timeSlider.addEventListener('input', onTimeSliderChange);
+                document.getElementById('closeInfoPanel').addEventListener('click', () => {
+                    document.getElementById('infoPanel').style.display = 'none';
+                });
+                renderer.domElement.addEventListener('click', onCanvasClick);
+                renderer.domElement.addEventListener('mousemove', onCanvasMouseMove);
+                
+                animate(); // Start animation loop only once
+            }
+
+            createEstablishmentObjects();
+            createEmployeeObjects();
+            updateVisuals(currentTime, true);
+            loadingIndicatorDiv.style.display = 'none';
+        }
+
+
+        function createEstablishmentObjects() {
+            const geometry = new THREE.SphereGeometry(25, 32, 32);
+            establishmentsData.forEach(data => {
+                const material = new THREE.MeshPhongMaterial({ color: data.color });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.set(data.initialPosition.x, data.initialPosition.y, data.initialPosition.z);
+                mesh.userData = { type: 'establishment', id: data.id, ...data };
+                scene.add(mesh);
+                establishmentMeshes[data.id] = mesh;
+                establishments[data.id] = { ...data, mesh: mesh, currentEmployees: new Set() };
+            });
+        }
+
+        function createEmployeeObjects() {
+            const geometry = new THREE.SphereGeometry(5, 16, 16);
+            Object.entries(employeesData).forEach(([id, data]) => {
+                const material = new THREE.MeshPhongMaterial({ color: data.color || 0xffffff });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.userData = { type: 'employee', id: id, ...data };
+                scene.add(mesh);
+                employeeMeshes[id] = mesh;
+
+                employees[id] = {
+                    ...data,
+                    mesh: mesh,
+                    currentEstablishmentId: data.initialEstablishmentId,
+                    currentBalance: data.balance,
+                    isAnimating: false,
+                    animationData: null
+                };
+                if (establishments[data.initialEstablishmentId]) {
+                    establishments[data.initialEstablishmentId].currentEmployees.add(id);
+                }
+            });
+        }
+
+        function getEmployeeStateAtTime(employeeId, time) {
+            const employeeInitialData = employeesData[employeeId];
+            if (!employeeInitialData) return { establishmentId: null, balance: 0 }; // Should not happen if data is consistent
+
+            let currentEstId = employeeInitialData.initialEstablishmentId;
+            let currentBalance = employeeInitialData.balance;
+
+            const relevantTransfers = transfersData
+                .filter(t => String(t.employeeId) === employeeId && parseInt(t.timestamp) <= time)
+                .sort((a, b) => parseInt(a.timestamp) - parseInt(b.timestamp));
+
+            relevantTransfers.forEach(transfer => {
+                currentEstId = String(transfer.toId);
+                currentBalance += parseFloat(transfer.balanceChange);
+            });
+            return { establishmentId: currentEstId, balance: currentBalance };
+        }
+
+        function updateVisuals(time, isInitialPlacement = false) {
+            Object.entries(employees).forEach(([empId, empData]) => {
+                const stateAtTime = getEmployeeStateAtTime(empId, time);
+                const targetEstablishmentId = stateAtTime.establishmentId;
+                empData.currentBalance = stateAtTime.balance;
+
+                const oldEstablishmentId = empData.currentEstablishmentId;
+
+                if (oldEstablishmentId !== targetEstablishmentId && !isInitialPlacement) {
+                    const fromEstMesh = establishmentMeshes[oldEstablishmentId];
+                    const toEstMesh = establishmentMeshes[targetEstablishmentId];
+
+                    if (fromEstMesh && toEstMesh) {
+                        empData.isAnimating = true;
+                        empData.animationData = {
+                            startPos: empData.mesh.position.clone(),
+                            endPos: getEmployeePositionAroundEstablishment(toEstMesh, empId),
+                            startTime: Date.now()
+                        };
+                        if(establishments[oldEstablishmentId]) establishments[oldEstablishmentId].currentEmployees.delete(empId);
+                        if(establishments[targetEstablishmentId]) establishments[targetEstablishmentId].currentEmployees.add(empId);
+                        empData.currentEstablishmentId = targetEstablishmentId;
+                    }
+                } else if ((empData.currentEstablishmentId !== targetEstablishmentId && isInitialPlacement) || isInitialPlacement) {
+                    // This condition ensures initial placement happens correctly even if target is the same as initial.
+                    // And also handles the direct jump to target if it's an initial placement to a different establishment.
+                    empData.currentEstablishmentId = targetEstablishmentId; // Update logical current Est ID
+                    if(establishments[oldEstablishmentId] && oldEstablishmentId !== targetEstablishmentId) {
+                        establishments[oldEstablishmentId].currentEmployees.delete(empId);
+                    }
+                    if(establishments[targetEstablishmentId]) { // Add to new (or initial) establishment
+                        establishments[targetEstablishmentId].currentEmployees.add(empId);
+                    }
+                    
+                    const targetEstMesh = establishmentMeshes[targetEstablishmentId];
+                    if (targetEstMesh) {
+                        empData.mesh.position.copy(getEmployeePositionAroundEstablishment(targetEstMesh, empId));
+                    }
+                } else if (!empData.isAnimating) {
+                    const currentEstMesh = establishmentMeshes[empData.currentEstablishmentId];
+                    if (currentEstMesh) {
+                         empData.mesh.position.copy(getEmployeePositionAroundEstablishment(currentEstMesh, empId));
+                    }
+                }
+            });
+        }
+        
+        function getEmployeePositionAroundEstablishment(establishmentMesh, employeeId) {
+            const basePos = establishmentMesh.position.clone();
+            // Ensure the set of employees for the current establishment is up-to-date
+            const estObject = establishments[establishmentMesh.userData.id];
+            if (!estObject || !estObject.currentEmployees) return basePos.add(new THREE.Vector3(0, EMPLOYEE_SPREAD_RADIUS + 5, 0));
+
+            const employeeArray = Array.from(estObject.currentEmployees);
+            const employeeIndex = employeeArray.indexOf(employeeId);
+            const totalEmployeesAtEst = employeeArray.length;
+            
+            if (totalEmployeesAtEst <= 0 || employeeIndex === -1) { // If employee not found or no employees
+                 // Default to a position slightly above if not found or only one, or if set is empty
+                return basePos.add(new THREE.Vector3(Math.random()*5-2.5, (establishmentMesh.geometry.parameters.radius || 25) + 5 + Math.random()*5, Math.random()*5-2.5));
+            }
+
+            const angle = (employeeIndex / totalEmployeesAtEst) * Math.PI * 2;
+            const offsetX = Math.cos(angle) * EMPLOYEE_SPREAD_RADIUS;
+            const offsetZ = Math.sin(angle) * EMPLOYEE_SPREAD_RADIUS;
+            const establishmentRadius = establishmentMesh.geometry.parameters.radius || 25;
+            return basePos.add(new THREE.Vector3(offsetX, establishmentRadius * 0.5 + Math.random()*2, offsetZ)); // Add small random y to differentiate
+        }
+
+        function onWindowResize() {
+            if (!camera || !renderer) return;
+            const container = document.getElementById('visualizationContainer');
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        }
+
+        function onTimeSliderChange(event) {
+            currentTime = parseInt(event.target.value);
+            currentTimeDisplay.textContent = `Month: ${currentTime}`;
+            updateVisuals(currentTime);
+        }
+
+        function onCanvasClick(event) {
+            if (!scene || !camera) return;
+            mouse.x = (event.clientX / renderer.domElement.clientWidth) * 2 - 1;
+            mouse.y = -(event.clientY / renderer.domElement.clientHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children, true);
+            if (intersects.length > 0) {
+                const intersectedObject = intersects[0].object;
+                if (intersectedObject.userData && (intersectedObject.userData.type === 'establishment' || intersectedObject.userData.type === 'employee')) {
+                    displayInfo(intersectedObject.userData);
+                }
+            } else {
+                document.getElementById('infoPanel').style.display = 'none';
+            }
+        }
+        
+        function onCanvasMouseMove(event) {
+            if (!scene || !camera) return;
+            mouse.x = (event.clientX / renderer.domElement.clientWidth) * 2 - 1;
+            mouse.y = -(event.clientY / renderer.domElement.clientHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children, true);
+            if (intersects.length > 0) {
+                const intersectedObject = intersects[0].object;
+                if (intersectedObject.userData && (intersectedObject.userData.type === 'establishment' || intersectedObject.userData.type === 'employee')) {
+                    tooltip.style.opacity = '1';
+                    tooltip.style.left = `${event.clientX + 10}px`;
+                    tooltip.style.top = `${event.clientY + 10}px`;
+                    tooltip.textContent = `${intersectedObject.userData.type === 'establishment' ? 'Est:' : 'Emp:'} ${intersectedObject.userData.name} (${intersectedObject.userData.id})`;
+                } else {
+                    tooltip.style.opacity = '0';
+                }
+            } else {
+                tooltip.style.opacity = '0';
+            }
+        }
+
+        function displayInfo(data) {
+            const infoPanel = document.getElementById('infoPanel');
+            const infoName = document.getElementById('infoName');
+            const infoDetails = document.getElementById('infoDetails');
+            infoName.textContent = data.name || data.id;
+            let detailsHtml = `<p><strong>ID:</strong> ${data.id}</p>`;
+            if (data.type === 'establishment') {
+                detailsHtml += `<p><strong>Industry:</strong> ${data.industry}</p>`;
+                detailsHtml += `<p><strong>City:</strong> ${data.city}</p>`;
+                detailsHtml += `<p><strong>Owners:</strong> ${Array.isArray(data.owners) ? data.owners.join(', ') : data.owners}</p>`;
+                const currentEmpList = establishments[data.id] && establishments[data.id].currentEmployees ? 
+                                     Array.from(establishments[data.id].currentEmployees).map(empId => employees[empId]? employees[empId].name : empId).join(', ') || 'None' 
+                                     : 'None';
+                const empCount = establishments[data.id] && establishments[data.id].currentEmployees ? establishments[data.id].currentEmployees.size : 0;
+                detailsHtml += `<p><strong>Current Employees (${empCount}):</strong> ${currentEmpList}</p>`;
+            } else if (data.type === 'employee') {
+                const empFullData = employees[data.id];
+                detailsHtml += `<p><strong>Age:</strong> ${empFullData.age}</p>`;
+                detailsHtml += `<p><strong>Job Title:</strong> ${empFullData.jobTitle}</p>`;
+                detailsHtml += `<p><strong>Balance:</strong> ${empFullData.currentBalance.toLocaleString()}</p>`;
+                detailsHtml += `<p><strong>Wages:</strong> ${empFullData.wages.toLocaleString()}</p>`;
+                const currentEst = establishmentMeshes[empFullData.currentEstablishmentId];
+                detailsHtml += `<p><strong>Current Establishment:</strong> ${currentEst ? currentEst.userData.name : empFullData.currentEstablishmentId}</p>`;
+            }
+            infoDetails.innerHTML = detailsHtml;
+            infoPanel.style.display = 'block';
+        }
+
+        let animationFrameId = null;
+        function animate() {
+            animationFrameId = requestAnimationFrame(animate);
+            if (controls) controls.update();
+            TWEEN.update();
+            Object.values(employees).forEach(empData => {
+                if (empData.isAnimating && empData.animationData) {
+                    const ad = empData.animationData;
+                    const elapsedTime = Date.now() - ad.startTime;
+                    let progress = elapsedTime / EMPLOYEE_ANIMATION_DURATION;
+                    if (progress >= 1) {
+                        progress = 1;
+                        empData.isAnimating = false;
+                        empData.animationData = null;
+                        empData.mesh.position.copy(ad.endPos);
+                    } else {
+                        empData.mesh.position.lerpVectors(ad.startPos, ad.endPos, progress);
+                    }
+                }
+            });
+            if (renderer && scene && camera) renderer.render(scene, camera);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Don't init here, wait for file upload.
+            // The animate loop will be started by resetAndInitializeScene
+        });
+    </script>
+</body>
+</html>
